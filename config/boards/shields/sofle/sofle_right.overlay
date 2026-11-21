@@ -94,10 +94,7 @@
     swipes;
     three-finger-drag;
     three-finger-hold-ms = <250>;
-    three-finger-swipe-distance = <150>;
-    three-finger-drag-distance = <20>;
-    // Match the central pointer transform so "up" follows the cursor's axes.
-    gesture-transform = <(INPUT_TRANSFORM_XY_SWAP | INPUT_TRANSFORM_X_INVERT)>;
+    three-finger-drag-distance = <12>;
     zoom;
     enable-power-management;
 

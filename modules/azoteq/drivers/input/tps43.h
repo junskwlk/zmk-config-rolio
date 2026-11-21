@@ -211,9 +211,7 @@ struct tps43_config {
     bool swipes;
     bool three_finger_drag;
     uint32_t three_finger_hold_ms;
-    uint32_t three_finger_swipe_distance;
     uint32_t three_finger_drag_distance;
-    uint32_t gesture_transform;
     bool invert_x;
     bool invert_y;
     bool switch_xy;

@@ -499,11 +499,9 @@ static void tps43_work_handler(struct k_work *work) {
 
     if (config->three_finger_drag) {
         int32_t gx = rel_x, gy = rel_y;
-        tps43_gesture_transform(config->gesture_transform, &gx, &gy);
         struct tps43_gesture_result gesture = tps43_gesture_update(
             &drv_data->gesture, num_fingers, gx, gy, k_uptime_get(),
-            config->three_finger_hold_ms, config->three_finger_swipe_distance,
-            config->three_finger_drag_distance);
+            config->three_finger_hold_ms, config->three_finger_drag_distance);
         if (gesture.consume) {
             if (is_drag_active) {
                 diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
@@ -515,14 +513,13 @@ static void tps43_work_handler(struct k_work *work) {
             if (gesture.press) {
                 diag_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
             }
-            uint16_t code = 0;
-            switch (gesture.swipe) {
-            case TPS43_S_UP: code = INPUT_BTN_NORTH; break;
-            default: break;
-            }
-            if (code && config->swipes) {
-                diag_report_key(dev, code, 1, true, K_FOREVER);
-                diag_report_key(dev, code, 0, true, K_FOREVER);
+            /* NORTH is the internal split event mapped to Mission Control.
+             * It is now emitted only on the second three-finger tap's release.
+             */
+            if (gesture.double_tap) {
+                LOG_INF("Three-finger double tap -> Mission Control");
+                diag_report_key(dev, INPUT_BTN_NORTH, 1, true, K_FOREVER);
+                diag_report_key(dev, INPUT_BTN_NORTH, 0, true, K_FOREVER);
             }
             if (gesture.move && (rel_x || rel_y)) {
                 int32_t x = ((int32_t)rel_x * config->sensitivity) / 100;
@@ -1539,7 +1536,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 dedicated workqueue diagnostic v4: initialized");
+    LOG_INF("TPS43 v5: all-direction drag and three-finger double tap");
     return 0;
 }
 
@@ -1564,9 +1561,7 @@ static int tps43_init(const struct device *dev) {
         .swipes = DT_INST_PROP(inst, swipes),                                                        \
         .three_finger_drag = DT_INST_PROP(inst, three_finger_drag),                                  \
         .three_finger_hold_ms = DT_INST_PROP(inst, three_finger_hold_ms),                            \
-        .three_finger_swipe_distance = DT_INST_PROP(inst, three_finger_swipe_distance),              \
         .three_finger_drag_distance = DT_INST_PROP(inst, three_finger_drag_distance),                \
-        .gesture_transform = DT_INST_PROP(inst, gesture_transform),                                \
         .invert_x = DT_INST_PROP(inst, invert_x),                                                    \
         .invert_y = DT_INST_PROP(inst, invert_y),                                                    \
         .switch_xy = DT_INST_PROP(inst, switch_xy),                                                  \

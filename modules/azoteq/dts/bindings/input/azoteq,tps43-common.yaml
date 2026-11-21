@@ -132,34 +132,21 @@ properties:
   three-finger-drag:
     type: boolean
     description: |
-      Arbitrate three-finger gestures in software. Before the hold timeout,
-      a fast upward movement past the distance threshold emits one up swipe.
-      Other directions start dragging after a small movement deadzone.
-      Upward dragging starts after the timeout. The drag ends when a finger lifts.
+      Three-finger movement starts a drag in any direction after a small
+      deadzone, or after the hold timeout. Two stationary three-finger taps
+      (each at most 220ms, completed at most 350ms apart) emit INPUT_BTN_NORTH.
+      The drag ends when a finger lifts; all fingers must lift before restarting.
       Suppresses the chip's single-finger swipe recognition when enabled.
 
   three-finger-hold-ms:
     type: int
     default: 250
-    description: Delay before three-finger drag, in milliseconds; zero means immediate drag.
-
-  three-finger-swipe-distance:
-    type: int
-    default: 150
-    description: Accumulated raw sensor units needed for an upward swipe before the hold timeout.
+    description: Stationary hold duration before drag starts; motion can start it earlier.
 
   three-finger-drag-distance:
     type: int
-    default: 20
-    description: Movement deadzone in raw units for starting a sideways or downward drag.
-
-  gesture-transform:
-    type: int
-    default: 0
-    description: |
-      Apply the same ZMK INPUT_TRANSFORM_* flags as the central XY listener
-      when interpreting software swipe direction. Pointer movement is not
-      transformed here, since the listener already transforms it.
+    default: 12
+    description: Movement deadzone in raw units for starting a drag in any direction.
 
   switch-xy:
     type: boolean

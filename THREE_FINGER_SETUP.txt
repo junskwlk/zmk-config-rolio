@@ -1,43 +1,25 @@
-対象
-  junskwlk/zmk-config-rolio の e73-sofle ブランチ
-  確認した元コミット: ff6b31d
-  beekeeb/zmk_driver_azoteq の固定コミットを同梱し、独自の三本指判定を追加。
+Sofle v5: 三本指ドラッグ＋三本指ダブルタップ
 
-操作
-  三本指で素早く上へ払う: Mission Control (Control + 上矢印)
-  三本指で横または下になぞる: 小さな移動の後、左ドラッグ
-  三本指で上になぞる: 最大250msの判定待ちの後、左ドラッグ
-  ドラッグ中: 上下左右どこへ動かしてもドラッグを継続
-  指が三本でなくなった時点: 左ボタンを解除
-  次の三本指操作: すべての指を離してから開始
+・三本指で上下左右になぞる: 左ボタンを押した状態で移動。
+・開始時は12センサー単位の小さな遊びを設ける。静止したまま250ms保持してもドラッグ開始。
+・ドラッグ中に上へ移動してもMission Controlには切り替わらない。
+・指が減ると左ボタンを離す。再開するには全指を離す。
+・三本指で短く2回タップ: Mission Control（Control＋↑）。
+  1回のタップは220ms以内、2回の完了間隔は350ms以内。
+・単発の三本指タップは何もしない。
+・動かしてドラッグになった操作はダブルタップとして数えない。
 
-制約
-  素早い上方向へのドラッグと上スワイプは同じ入力なので区別できない。
-  この変更では素早い上移動をMission Controlとして扱う。
-  上へドラッグするときは、約250ms待つか、少し横へ動かしてから上へ動かす。
-  Apple純正の三本指ドラッグと同じ使用感を保証するものではない。
+上スワイプによるMission Controlは廃止。
+右からの内部INPUT_BTN_NORTHイベントを左のinput processorがマクロに変換。
+左右のv5 UF2をそれぞれ対応する側に書く。書き込みはユーザーが行う。
+Mac側のMission ControlのControl＋↑ショートカットが有効である必要がある。
+設定の変更やペアリングのリセットはこの変更には含まない。
 
-適用とビルド
-  e73-sofleブランチの作業コピーのルートで:
-    git apply --check /path/to/sofle-three-finger.patch
-    git apply /path/to/sofle-three-finger.patch
+v4で確認できた入力待ちによる停止の対策（専用workqueue）と、
+v3のセンサー通信終了手順の修正は引き継いでいる。
+右側のUSBログも残しており、必要時は実機で確認できる。
 
-  GitHubへ変更を反映すると、既存のBuild ZMK firmwareワークフローでビルドされる。
-  左右両方のファームウェアに変更があるため、左右両方のUF2が必要。
-  Actionsの生成物: nice_sofle_left_vista508、nice_sofle_right_touchpad
-  設定初期化用のsettings_resetは、この変更の適用には不要。
-
-調整
-  config/boards/shields/sofle/sofle_right.overlay:
-    three-finger-hold-ms: 上移動をスワイプとみなす時間窓 (初期250ms)
-    three-finger-swipe-distance: 上スワイプ成立までのセンサー移動量 (初期150)
-    three-finger-drag-distance: 横・下ドラッグ開始までの移動量 (初期20)
-    gesture-transform: 左側のXY変換と同じ値にする
-
-検証状況
-  C言語の状態遷移テストをAddressSanitizer/UndefinedBehaviorSanitizer付きで実行済み。
-  連続発火防止、横・下ドラッグ、遅い上ドラッグ、部分的な指離れ、全指離れ、
-  読み取り失敗や休止時のキャンセル、既存の座標変換との整合を検証。
-  左右UF2のGitHub Actionsビルドは成功。実機検証は未実施。
-  成功したビルド: https://github.com/junskwlk/zmk-config-rolio/actions/runs/44886853614
-  ファームウェアのソースコミット: ef7491cdb5967f8baefa532c8f1fb66d78dee527
+確認:
+ホストCのサニタイザ付きテストで、4方向開始・ドラッグ中の方向転換・
+指を順に離すダブルタップ・単発/時間切れ・ドラッグ時に誤発火しないことを検証。
+実機で上下ドラッグとダブルタップの確認が必要。

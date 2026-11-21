@@ -25,7 +25,7 @@
 #define FN  2
 #define HOTKEY  3
 
-/* Runs on the left/central half after the right half forwards swipe events. */
+/* Runs on the left/central half after the right half forwards three-finger double-tap events. */
 / {
     behaviors {
         mission_control: mission_control {

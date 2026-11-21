@@ -15,6 +15,7 @@ stubs = r'''
 #include <errno.h>
 #include <stdio.h>
 #define LOG_INF(...) ((void)0)
+#define LOG_DBG(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
 #define BIT(n) (1u << (n))
@@ -38,6 +39,9 @@ struct tps43_config {
     struct { const struct device *bus; unsigned addr; } i2c_bus;
     struct gpio rst_gpio, rdy_gpio;
 };
+static const struct device *diag_dev;
+static int diag_online;
+static void atomic_set(int *target, int value) { *target = value; }
 static struct tps43_drv_data *active;
 static bool armed, callback_added, ready_high, inject_irq;
 static int submitted;
@@ -104,6 +108,7 @@ int main(void) {
         submitted = 0;
         assert(tps43_init(&dev) == 0);
         assert(armed && data.initialized);
+        assert(diag_dev == &dev && diag_online == 1);
         assert(submitted == (scenario == 0 ? 0 : 1));
     }
     puts("driver init interrupt/rdy tests passed");

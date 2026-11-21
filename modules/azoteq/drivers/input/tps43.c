@@ -18,6 +18,57 @@
 
 LOG_MODULE_REGISTER(tps43, CONFIG_INPUT_LOG_LEVEL);
 
+/* Diagnostic-only build: atomics allow observation without taking the driver's lock.
+ * No polling reads, resets, or timeout changes are added to the sensor path.
+ * stage: 0 idle, 1 lock, 2 I2C read, 3 processing, 4 input report, 5 end window.
+ */
+#include <zephyr/sys/atomic.h>
+static atomic_t diag_irq, diag_work, diag_reads, diag_errors, diag_stage;
+static atomic_t diag_reports, diag_delivered, diag_report_errors;
+static atomic_t diag_fingers, diag_phase, diag_dx, diag_dy, diag_info, diag_online;
+static const struct device *diag_dev;
+
+static int diag_report(const struct device *dev, uint8_t type, uint16_t code,
+                       int32_t value, bool sync, k_timeout_t timeout) {
+    atomic_val_t previous = atomic_set(&diag_stage, 4);
+    int ret = input_report(dev, type, code, value, sync, timeout);
+    if (ret) { atomic_inc(&diag_report_errors); }
+    else { atomic_inc(&diag_reports); }
+    atomic_set(&diag_stage, previous);
+    return ret;
+}
+#define diag_report_key(dev, code, value, sync, timeout) \
+    diag_report(dev, INPUT_EV_KEY, code, value, sync, timeout)
+#define diag_report_rel(dev, code, value, sync, timeout) \
+    diag_report(dev, INPUT_EV_REL, code, value, sync, timeout)
+
+static void diag_input_received(struct input_event *event) {
+    if (atomic_get(&diag_online) && event->dev == diag_dev) {
+        atomic_inc(&diag_delivered);
+    }
+}
+INPUT_CALLBACK_DEFINE(NULL, diag_input_received);
+
+static void diag_heartbeat(void *a, void *b, void *c) {
+    ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+    while (true) {
+        k_sleep(K_SECONDS(1));
+        if (!atomic_get(&diag_online)) { continue; }
+        const struct tps43_config *cfg = diag_dev->config;
+        LOG_INF("DIAG irq=%ld work=%ld read=%ld err=%ld stage=%ld rdy=%d",
+                (long)atomic_get(&diag_irq), (long)atomic_get(&diag_work),
+                (long)atomic_get(&diag_reads), (long)atomic_get(&diag_errors),
+                (long)atomic_get(&diag_stage), gpio_pin_get_dt(&cfg->rdy_gpio));
+        LOG_INF("DIAG fingers=%ld phase=%ld dx=%ld dy=%ld info=%ld sent=%ld delivered=%ld fail=%ld",
+                (long)atomic_get(&diag_fingers), (long)atomic_get(&diag_phase),
+                (long)atomic_get(&diag_dx), (long)atomic_get(&diag_dy),
+                (long)atomic_get(&diag_info), (long)atomic_get(&diag_reports),
+                (long)atomic_get(&diag_delivered), (long)atomic_get(&diag_report_errors));
+    }
+}
+K_THREAD_DEFINE(tps43_diagnostic_thread, 1536, diag_heartbeat, NULL, NULL, NULL, 5, 0, 0);
+
+
 /**
  * @brief Ends communication window with trackpad
  *
@@ -35,7 +86,7 @@ static void tps43_end_communication_window(const struct device *dev) {
 
     int ret = i2c_write_dt(&config->i2c_bus, end_buf, sizeof(end_buf));
     if (ret != 0 && ret != -EIO) {
-        LOG_INF("End communication window write returned: %d (NACK expected)", ret);
+        LOG_DBG("End communication window write returned: %d (NACK expected)", ret);
     }
 }
 
@@ -144,7 +195,7 @@ static int tps43_i2c_read_reg8_w_err(const struct device *dev, uint16_t reg, uin
     ret = i2c_write_read_dt(&config->i2c_bus, reg_buf, sizeof(reg_buf), val, 1);
     if (ret != 0) {
         if (!with_err) {
-            LOG_INF("Expected completion of register 0x%04x read: %d", reg, ret);
+            LOG_DBG("Expected completion of register 0x%04x read: %d", reg, ret);
         } else {
             LOG_ERR("Register 0x%04x read error: %d", reg, ret);
         }
@@ -198,6 +249,7 @@ static int tps43_i2c_write_reg8(const struct device *dev, uint16_t reg, uint8_t 
  static void tps43_rdy_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins) {
      struct tps43_drv_data *drv_data = CONTAINER_OF(cb, struct tps43_drv_data, rdy_cb);
 
+     atomic_inc(&diag_irq);
      k_work_submit(&drv_data->work);
  }
 
@@ -207,7 +259,7 @@ static void tps43_dump_status(const struct device *dev) {
 
     uint8_t sys_info = 0;
     tps43_i2c_read_reg8(dev, TPS43_REG_SYSTEM_INFO_0, &sys_info);
-    LOG_INF("Charging state: 0x%02X", sys_info & TPS43_CHARGING_MODE_MASK); // for debugging charging mode
+    LOG_DBG("Charging state: 0x%02X", sys_info & TPS43_CHARGING_MODE_MASK); // for debugging charging mode
 }
 
 /** Force communication start with the trackpad.  See datasheet 8.8.2 */
@@ -221,7 +273,7 @@ static void tps43_force_communication(const struct device *dev) {
 static void tps43_cancel_gesture(const struct device *dev) {
     struct tps43_drv_data *data = dev->data;
     if (tps43_gesture_cancel(&data->gesture) || data->drag_active) {
-        input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+        diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
     }
     data->drag_active = false;
 }
@@ -265,7 +317,7 @@ static int tps43_set_suspend_internal(const struct device *dev, bool suspend, bo
     if (suspend && config->rdy_gpio.port != NULL) {
         ret = gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_DISABLE);
         if (ret == 0) {
-            LOG_INF("RDY interrupts disabled before suspend");
+            LOG_DBG("RDY interrupts disabled before suspend");
         }
     }
 
@@ -275,7 +327,7 @@ static int tps43_set_suspend_internal(const struct device *dev, bool suspend, bo
     if (drv_data->suspended && !suspend) {
         tps43_force_communication(dev);
         k_sleep(K_MSEC(1)); // need at least 200uS before 2nd read
-        LOG_INF("I2C Wake: device awakened from suspend");
+        LOG_DBG("I2C Wake: device awakened from suspend");
 
         // After wake-up, read register again
         ret = tps43_i2c_read_reg8(dev, TPS43_REG_SYSTEM_CONTROL_1, &control_reg);
@@ -290,16 +342,16 @@ static int tps43_set_suspend_internal(const struct device *dev, bool suspend, bo
 
     if (suspend) {
         control_reg |= TPS43_SUSPEND;
-        LOG_INF("Entering suspend (low power consumption)");
+        LOG_DBG("Entering suspend (low power consumption)");
     } else {
         control_reg &= ~TPS43_SUSPEND;
-        LOG_INF("Exiting suspend");
+        LOG_DBG("Exiting suspend");
     }
 
     ret = tps43_i2c_write_reg8(dev, TPS43_REG_SYSTEM_CONTROL_1, control_reg);
     if (ret != 0) {
         if (ret == -EIO && suspend) {
-            LOG_INF("Failed to write suspend, device already in suspend");
+            LOG_DBG("Failed to write suspend, device already in suspend");
             drv_data->suspended = true;
             ret = 0;
             goto done;
@@ -315,7 +367,7 @@ done:
     if (!suspend && config->rdy_gpio.port != NULL) {
         ret = gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_EDGE_TO_ACTIVE);
         if (ret == 0) {
-            LOG_INF("RDY interrupts enabled");
+            LOG_DBG("RDY interrupts enabled");
         }
     }
     tps43_end_communication_window(dev);
@@ -328,24 +380,24 @@ done:
 /** Common swipe handling for 1 and 3 finger variants */
 static void tps43_handle_swipe(const struct device *dev, int16_t rel_x, int16_t rel_y) {
     if (rel_x < 0) {
-        LOG_INF("swipe left - INPUT_BTN_WEST");
-        input_report_key(dev, INPUT_BTN_WEST, 1, true, K_FOREVER);
-        input_report_key(dev, INPUT_BTN_WEST, 0, true, K_FOREVER);
+        LOG_DBG("swipe left - INPUT_BTN_WEST");
+        diag_report_key(dev, INPUT_BTN_WEST, 1, true, K_FOREVER);
+        diag_report_key(dev, INPUT_BTN_WEST, 0, true, K_FOREVER);
     }
     if (rel_x > 0) {
-        LOG_INF("swipe right - INPUT_BTN_EAST");
-        input_report_key(dev, INPUT_BTN_EAST, 1, true, K_FOREVER);
-        input_report_key(dev, INPUT_BTN_EAST, 0, true, K_FOREVER);
+        LOG_DBG("swipe right - INPUT_BTN_EAST");
+        diag_report_key(dev, INPUT_BTN_EAST, 1, true, K_FOREVER);
+        diag_report_key(dev, INPUT_BTN_EAST, 0, true, K_FOREVER);
     }
     if (rel_y < 0) {
-        LOG_INF("swipe up - INPUT_BTN_NORTH");
-        input_report_key(dev, INPUT_BTN_NORTH, 1, true, K_FOREVER);
-        input_report_key(dev, INPUT_BTN_NORTH, 0, true, K_FOREVER);
+        LOG_DBG("swipe up - INPUT_BTN_NORTH");
+        diag_report_key(dev, INPUT_BTN_NORTH, 1, true, K_FOREVER);
+        diag_report_key(dev, INPUT_BTN_NORTH, 0, true, K_FOREVER);
     }
     if (rel_y > 0) {
-        LOG_INF("swipe down - INPUT_BTN_SOUTH");
-        input_report_key(dev, INPUT_BTN_SOUTH, 1, true, K_FOREVER);
-        input_report_key(dev, INPUT_BTN_SOUTH, 0, true, K_FOREVER);
+        LOG_DBG("swipe down - INPUT_BTN_SOUTH");
+        diag_report_key(dev, INPUT_BTN_SOUTH, 1, true, K_FOREVER);
+        diag_report_key(dev, INPUT_BTN_SOUTH, 0, true, K_FOREVER);
     }
 }
 
@@ -371,6 +423,7 @@ static void tps43_work_handler(struct k_work *work) {
     bool is_drag_active = drv_data->drag_active;
     int ret;
 
+    atomic_inc(&diag_work);
     // If device is in suspend, ignore interrupt (RDY should be disabled)
     if (drv_data->suspended) {
         LOG_WRN("RDY interrupt in suspend mode - ignoring");
@@ -379,7 +432,9 @@ static void tps43_work_handler(struct k_work *work) {
 
     // Acquire semaphore to protect all I2C operations from interruption
     // This prevents conflicts during simultaneous trackpad access
+    atomic_set(&diag_stage, 1);
     k_sem_take(&drv_data->lock, K_FOREVER);
+    atomic_set(&diag_stage, 2);
 
     /*
      * Read the whole contiguous block from GESTURE_EVENTS_0 through REL_Y in a
@@ -397,22 +452,29 @@ static void tps43_work_handler(struct k_work *work) {
     ret = read_sequence_registers(dev, TPS43_REG_GESTURE_EVENTS_0, touch_data,
                                   sizeof(touch_data));
     if (ret < 0) {
+        atomic_inc(&diag_errors);
         LOG_ERR("Touch data read error: %d", ret);
         tps43_cancel_gesture(dev);
         is_drag_active = false;
         goto done;
     }
 
+    atomic_inc(&diag_reads);
+    atomic_set(&diag_stage, 3);
     const uint8_t gestures_events[2] = {touch_data[0], touch_data[1]};
     uint8_t num_fingers = touch_data[4];
     int16_t rel_x = (int16_t)((touch_data[5] << 8) | touch_data[6]);
     int16_t rel_y = (int16_t)((touch_data[7] << 8) | touch_data[8]);
 
+    atomic_set(&diag_fingers, num_fingers);
+    atomic_set(&diag_dx, rel_x);
+    atomic_set(&diag_dy, rel_y);
+    atomic_set(&diag_info, (touch_data[2] << 8) | touch_data[3]);
     bool is_touching = (num_fingers > 0);
     if (is_touching != drv_data->touching) {
         drv_data->touching = is_touching;
-        LOG_INF("Touch state changed: %s", is_touching ? "down" : "up");
-        input_report_key(dev, INPUT_BTN_TOUCH, is_touching ? 1 : 0, true, K_FOREVER);
+        LOG_DBG("Touch state changed: %s", is_touching ? "down" : "up");
+        diag_report_key(dev, INPUT_BTN_TOUCH, is_touching ? 1 : 0, true, K_FOREVER);
     }
 
     if (config->three_finger_drag) {
@@ -424,14 +486,14 @@ static void tps43_work_handler(struct k_work *work) {
             config->three_finger_drag_distance);
         if (gesture.consume) {
             if (is_drag_active) {
-                input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+                diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
                 is_drag_active = false;
             }
             if (gesture.release) {
-                input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+                diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
             }
             if (gesture.press) {
-                input_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
+                diag_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
             }
             uint16_t code = 0;
             switch (gesture.swipe) {
@@ -439,15 +501,15 @@ static void tps43_work_handler(struct k_work *work) {
             default: break;
             }
             if (code && config->swipes) {
-                input_report_key(dev, code, 1, true, K_FOREVER);
-                input_report_key(dev, code, 0, true, K_FOREVER);
+                diag_report_key(dev, code, 1, true, K_FOREVER);
+                diag_report_key(dev, code, 0, true, K_FOREVER);
             }
             if (gesture.move && (rel_x || rel_y)) {
                 int32_t x = ((int32_t)rel_x * config->sensitivity) / 100;
                 int32_t y = ((int32_t)rel_y * config->sensitivity) / 100;
-                input_report_rel(dev, INPUT_REL_X, CLAMP(x, INT16_MIN, INT16_MAX), false,
+                diag_report_rel(dev, INPUT_REL_X, CLAMP(x, INT16_MIN, INT16_MAX), false,
                                  K_FOREVER);
-                input_report_rel(dev, INPUT_REL_Y, CLAMP(y, INT16_MIN, INT16_MAX), true,
+                diag_report_rel(dev, INPUT_REL_Y, CLAMP(y, INT16_MIN, INT16_MAX), true,
                                  K_FOREVER);
             }
             goto done;
@@ -456,27 +518,27 @@ static void tps43_work_handler(struct k_work *work) {
 
     if (gestures_events[0] != 0 || gestures_events[1] != 0) {
 
-        LOG_INF("Gestures: Single=0x%02X, Multi=0x%02X", gestures_events[0], gestures_events[1]);
+        LOG_DBG("Gestures: Single=0x%02X, Multi=0x%02X", gestures_events[0], gestures_events[1]);
 
         if (gestures_events[0] & TPS43_SINGLE_TAP) {
-            LOG_INF("Single tap → LEFT BUTTON");
-            input_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
-            input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+            LOG_DBG("Single tap → LEFT BUTTON");
+            diag_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
+            diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
         }
         if (gestures_events[0] & (TPS43_SWIPE_UP | TPS43_SWIPE_DOWN | TPS43_SWIPE_LEFT | TPS43_SWIPE_RIGHT)) {
-            LOG_INF("Single finger swipe");
+            LOG_DBG("Single finger swipe");
             tps43_handle_swipe(dev, rel_x, rel_y);
         }
         if (gestures_events[1] & TPS43_TWO_FINGER_TAP) {
-            LOG_INF("Two finger tap → RIGHT BUTTON");
-            input_report_key(dev, INPUT_BTN_1, 1, true, K_FOREVER);
-            input_report_key(dev, INPUT_BTN_1, 0, true, K_FOREVER);
+            LOG_DBG("Two finger tap → RIGHT BUTTON");
+            diag_report_key(dev, INPUT_BTN_1, 1, true, K_FOREVER);
+            diag_report_key(dev, INPUT_BTN_1, 0, true, K_FOREVER);
         }
         if ((gestures_events[0] & TPS43_PRESS_AND_HOLD) && (!(is_drag_active))) {
-            LOG_INF("Press and hold detected - DRAG (HOLD LEFT BUTTON)");
+            LOG_DBG("Press and hold detected - DRAG (HOLD LEFT BUTTON)");
             // set internal drag flag and press left mouse button
             is_drag_active = true;
-            input_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
+            diag_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
         }
         if (gestures_events[1] & TPS43_SCROLL) {
             // set scroll flag for processing in tp_movement block
@@ -490,17 +552,17 @@ static void tps43_work_handler(struct k_work *work) {
 
     // Detect release of a 'press and hold' left press
     if ((!(gestures_events[0] & TPS43_PRESS_AND_HOLD)) && is_drag_active) {
-        LOG_INF("Press and hold end detected - RELEASE (RELEASE LEFT BUTTON)");
+        LOG_DBG("Press and hold end detected - RELEASE (RELEASE LEFT BUTTON)");
         // release drag flag and release left mouse button
         is_drag_active = false;
-        input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);   // release + sync
+        diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);   // release + sync
     }
 
     if (rel_x != 0 || rel_y != 0) {
         // Handle three-finger swipes
         if (config->swipes) {
             if (num_fingers == 3) {
-                LOG_INF("Three-finger movement - checking for swipe");
+                LOG_DBG("Three-finger movement - checking for swipe");
                 tps43_handle_swipe(dev, rel_x, rel_y);
             }
         }
@@ -513,23 +575,23 @@ static void tps43_work_handler(struct k_work *work) {
                     rel_x = -rel_x;
                 }
                 int16_t wheel = (rel_x * config->scroll_sensitivity) / 100;
-                LOG_INF("Scrolling %d horizontally", wheel);
-                input_report_rel(dev, INPUT_REL_HWHEEL, wheel, true, K_FOREVER);
+                LOG_DBG("Scrolling %d horizontally", wheel);
+                diag_report_rel(dev, INPUT_REL_HWHEEL, wheel, true, K_FOREVER);
             } else {
                 // Vertical scroll
                 if (config->invert_scroll_y) {
                     rel_y = -rel_y;
                 }
                 int16_t wheel = (rel_y * config->scroll_sensitivity) / 100;
-                LOG_INF("Scrolling %d vertically", wheel);
-                input_report_rel(dev, INPUT_REL_WHEEL, wheel, true, K_FOREVER);
+                LOG_DBG("Scrolling %d vertically", wheel);
+                diag_report_rel(dev, INPUT_REL_WHEEL, wheel, true, K_FOREVER);
             }
             is_scroll_active = false;
         } else if (is_zoom_active) {
             // Zoom processing: the zoom amount comes in via rel_x
             int16_t zoom_delta = (rel_x * config->zoom_sensitivity) / 100;
-            LOG_INF("Zooming %d, rel_x=%d", zoom_delta, rel_x);
-            input_report_rel(dev, INPUT_REL_MISC, zoom_delta, true, K_FOREVER);
+            LOG_DBG("Zooming %d, rel_x=%d", zoom_delta, rel_x);
+            diag_report_rel(dev, INPUT_REL_MISC, zoom_delta, true, K_FOREVER);
             is_zoom_active = false;
         } else {
             // Normal cursor movement
@@ -541,20 +603,23 @@ static void tps43_work_handler(struct k_work *work) {
                 int32_t scaled_y = ((int32_t)rel_y * config->sensitivity) / 100;
                 rel_y = (int16_t)CLAMP(scaled_y, INT16_MIN, INT16_MAX);
             }
-            LOG_INF("Sending movement: dx=%d, dy=%d", rel_x, rel_y);
+            LOG_DBG("Sending movement: dx=%d, dy=%d", rel_x, rel_y);
 
-            input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
-            input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
+            diag_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
+            diag_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
         }
     }
 
 done:
     // Save for next call
+    atomic_set(&diag_phase, drv_data->gesture.phase);
     drv_data->drag_active = is_drag_active;
+    atomic_set(&diag_stage, 5);
     tps43_end_communication_window(dev);
 
     // Release semaphore after completing all I2C operations
     k_sem_give(&drv_data->lock);
+    atomic_set(&diag_stage, 0);
 }
 
 /**
@@ -574,7 +639,7 @@ static int tps43_reset_values(const struct device *dev) {
     drv_data->drag_active = false;
     drv_data->gesture = (struct tps43_gesture){0};
 
-    LOG_INF("Values reset");
+    LOG_DBG("Values reset");
     return 0;
 }
 
@@ -610,7 +675,7 @@ static int tps43_configure_device(const struct device *dev) {
         LOG_WRN("Events to track write error: %d", ret);
         return ret;
     }
-    LOG_INF("Events configured: 0x%02X", events_to_track);
+    LOG_DBG("Events configured: 0x%02X", events_to_track);
 
     // axis configuration
     uint8_t xy_config = 0;
@@ -638,7 +703,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Single gestures configuration error: %d", ret);
             return ret;
         }
-        LOG_INF("Single gestures enabled: 0x%02X", single_gestures);
+        LOG_DBG("Single gestures enabled: 0x%02X", single_gestures);
     }
 
     // enable multi-gestures
@@ -653,7 +718,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Multi-gesture configuration error: %d", ret);
             return ret;
         }
-        LOG_INF("Multi-gestures enabled: 0x%02X", multi_gestures);
+        LOG_DBG("Multi-gestures enabled: 0x%02X", multi_gestures);
     }
 
     // filter configuration
@@ -662,7 +727,7 @@ static int tps43_configure_device(const struct device *dev) {
         LOG_WRN("Filter settings write error: %d", ret);
         return ret;
     }
-    LOG_INF("Filter settings set: 0x%02X", config->filter_settings);
+    LOG_DBG("Filter settings set: 0x%02X", config->filter_settings);
 
     // dynamic filter configuration (only if set in DT)
     if (config->filter_dynamic_bottom != -1) {
@@ -672,7 +737,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Dynamic filter bottom write error: %d", ret);
             return ret;
         }
-        LOG_INF("Dynamic filter bottom set: 0x%02X", (uint8_t)config->filter_dynamic_bottom);
+        LOG_DBG("Dynamic filter bottom set: 0x%02X", (uint8_t)config->filter_dynamic_bottom);
     }
 
     if (config->filter_dynamic_lower != -1) {
@@ -682,7 +747,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Dynamic filter lower write error: %d", ret);
             return ret;
         }
-        LOG_INF("Dynamic filter lower set: 0x%02X", (uint8_t)config->filter_dynamic_lower);
+        LOG_DBG("Dynamic filter lower set: 0x%02X", (uint8_t)config->filter_dynamic_lower);
     }
 
     if (config->filter_dynamic_upper != -1) {
@@ -692,7 +757,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Dynamic filter upper write error: %d", ret);
             return ret;
         }
-        LOG_INF("Dynamic filter upper set: 0x%04X", (uint16_t)config->filter_dynamic_upper);
+        LOG_DBG("Dynamic filter upper set: 0x%04X", (uint16_t)config->filter_dynamic_upper);
     }
 
     // resolution configuration (only if set in DT)
@@ -703,7 +768,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("X resolution write error: %d", ret);
             return ret;
         }
-        LOG_INF("X resolution set: %d", (uint16_t)config->x_resolution);
+        LOG_DBG("X resolution set: %d", (uint16_t)config->x_resolution);
     }
 
     if (config->y_resolution != -1) {
@@ -713,7 +778,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Y resolution write error: %d", ret);
             return ret;
         }
-        LOG_INF("Y resolution set: %d", (uint16_t)config->y_resolution);
+        LOG_DBG("Y resolution set: %d", (uint16_t)config->y_resolution);
     }
 
     // swipe configuration (only if set in DT)
@@ -724,7 +789,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Swipe distance write error: %d", ret);
             return ret;
         }
-        LOG_INF("Swipe initial distance set: %u px", (uint16_t)config->swipe_initial_distance);
+        LOG_DBG("Swipe initial distance set: %u px", (uint16_t)config->swipe_initial_distance);
     }
 
     if (config->swipe_initial_time != -1) {
@@ -734,7 +799,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Swipe time write error: %d", ret);
             return ret;
         }
-        LOG_INF("Swipe initial time set: %u ms", (uint16_t)config->swipe_initial_time);
+        LOG_DBG("Swipe initial time set: %u ms", (uint16_t)config->swipe_initial_time);
     }
 
     if (config->swipe_angle != -1) {
@@ -745,7 +810,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Swipe angle write error: %d", ret);
             return ret;
         }
-        LOG_INF("Swipe angle set: %d deg (reg: 0x%02X)", config->swipe_angle, reg_val);
+        LOG_DBG("Swipe angle set: %d deg (reg: 0x%02X)", config->swipe_angle, reg_val);
     }
 
     if (config->swipe_consecutive_distance != -1) {
@@ -755,7 +820,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Swipe consecutive distance write error: %d", ret);
             return ret;
         }
-        LOG_INF("Swipe consecutive distance set: %u px", (uint16_t)config->swipe_consecutive_distance);
+        LOG_DBG("Swipe consecutive distance set: %u px", (uint16_t)config->swipe_consecutive_distance);
     }
 
     if (config->swipe_consecutive_time != -1) {
@@ -765,7 +830,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Swipe consecutive time write error: %d", ret);
             return ret;
         }
-        LOG_INF("Swipe consecutive time set: %u ms", (uint16_t)config->swipe_consecutive_time);
+        LOG_DBG("Swipe consecutive time set: %u ms", (uint16_t)config->swipe_consecutive_time);
     }
 
     // scroll configuration (only if set in DT)
@@ -776,7 +841,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Scroll initial distance write error: %d", ret);
             return ret;
         }
-        LOG_INF("Scroll initial distance set: %u px", (uint16_t)config->scroll_initial_distance);
+        LOG_DBG("Scroll initial distance set: %u px", (uint16_t)config->scroll_initial_distance);
     }
 
     if (config->scroll_angle != -1) {
@@ -787,7 +852,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Scroll angle write error: %d", ret);
             return ret;
         }
-        LOG_INF("Scroll angle set: %d deg (reg: 0x%02X)", config->scroll_angle, reg_val);
+        LOG_DBG("Scroll angle set: %d deg (reg: 0x%02X)", config->scroll_angle, reg_val);
     }
 
     // zoom configuration (only if set in DT)
@@ -798,7 +863,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Zoom initial distance write error: %d", ret);
             return ret;
         }
-        LOG_INF("Zoom initial distance set: %u px", (uint16_t)config->zoom_initial_distance);
+        LOG_DBG("Zoom initial distance set: %u px", (uint16_t)config->zoom_initial_distance);
     }
 
     if (config->zoom_consecutive_distance != -1) {
@@ -808,7 +873,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Zoom consecutive distance write error: %d", ret);
             return ret;
         }
-        LOG_INF("Zoom consecutive distance set: %u px", (uint16_t)config->zoom_consecutive_distance);
+        LOG_DBG("Zoom consecutive distance set: %u px", (uint16_t)config->zoom_consecutive_distance);
     }
 
     // tap/hold configuration (only if set in DT)
@@ -819,7 +884,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Tap time write error: %d", ret);
             return ret;
         }
-        LOG_INF("Tap time set: %u ms", (uint16_t)config->tap_time);
+        LOG_DBG("Tap time set: %u ms", (uint16_t)config->tap_time);
     }
 
     if (config->tap_distance != -1) {
@@ -829,7 +894,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Tap distance write error: %d", ret);
             return ret;
         }
-        LOG_INF("Tap distance set: %u px", (uint16_t)config->tap_distance);
+        LOG_DBG("Tap distance set: %u px", (uint16_t)config->tap_distance);
     }
 
     if (config->hold_time != -1) {
@@ -839,7 +904,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Hold time write error: %d", ret);
             return ret;
         }
-        LOG_INF("Hold time set: %u ms", (uint16_t)config->hold_time);
+        LOG_DBG("Hold time set: %u ms", (uint16_t)config->hold_time);
     }
 
     // ATI configuration (only if set in DT)
@@ -850,7 +915,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("ATI target write error: %d", ret);
             return ret;
         }
-        LOG_INF("ATI target set: %u", (uint16_t)config->ati_target);
+        LOG_DBG("ATI target set: %u", (uint16_t)config->ati_target);
     }
 
     if (config->ref_drift_limit != -1) {
@@ -860,7 +925,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Ref drift limit write error: %d", ret);
             return ret;
         }
-        LOG_INF("Ref drift limit set: %u", (uint8_t)config->ref_drift_limit);
+        LOG_DBG("Ref drift limit set: %u", (uint8_t)config->ref_drift_limit);
     }
 
     if (config->reati_lower_limit != -1) {
@@ -870,7 +935,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("REATI lower limit write error: %d", ret);
             return ret;
         }
-        LOG_INF("REATI lower limit set: %u", (uint8_t)config->reati_lower_limit);
+        LOG_DBG("REATI lower limit set: %u", (uint8_t)config->reati_lower_limit);
     }
 
     if (config->reati_upper_limit != -1) {
@@ -880,7 +945,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("REATI upper limit write error: %d", ret);
             return ret;
         }
-        LOG_INF("REATI upper limit set: %u", (uint8_t)config->reati_upper_limit);
+        LOG_DBG("REATI upper limit set: %u", (uint8_t)config->reati_upper_limit);
     }
 
     if (config->max_count_limit != -1) {
@@ -890,7 +955,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Max count limit write error: %d", ret);
             return ret;
         }
-        LOG_INF("Max count limit set: %u", (uint16_t)config->max_count_limit);
+        LOG_DBG("Max count limit set: %u", (uint16_t)config->max_count_limit);
     }
 
     if (config->ati_retry_time != -1) {
@@ -900,7 +965,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("ATI retry time write error: %d", ret);
             return ret;
         }
-        LOG_INF("ATI retry time set: %u s", (uint8_t)config->ati_retry_time);
+        LOG_DBG("ATI retry time set: %u s", (uint8_t)config->ati_retry_time);
     }
 
     // Report rate configuration (only if set in DT)
@@ -911,7 +976,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Report rate active write error: %d", ret);
             return ret;
         }
-        LOG_INF("Report rate active set: %u ms", (uint16_t)config->report_rate_active);
+        LOG_DBG("Report rate active set: %u ms", (uint16_t)config->report_rate_active);
     }
 
     if (config->report_rate_idle_touch != -1) {
@@ -921,7 +986,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Report rate idle touch write error: %d", ret);
             return ret;
         }
-        LOG_INF("Report rate idle touch set: %u ms", (uint16_t)config->report_rate_idle_touch);
+        LOG_DBG("Report rate idle touch set: %u ms", (uint16_t)config->report_rate_idle_touch);
     }
 
     if (config->report_rate_idle != -1) {
@@ -931,7 +996,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Report rate idle write error: %d", ret);
             return ret;
         }
-        LOG_INF("Report rate idle set: %u ms", (uint16_t)config->report_rate_idle);
+        LOG_DBG("Report rate idle set: %u ms", (uint16_t)config->report_rate_idle);
     }
 
     if (config->report_rate_lp1 != -1) {
@@ -941,7 +1006,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Report rate LP1 write error: %d", ret);
             return ret;
         }
-        LOG_INF("Report rate LP1 set: %u ms", (uint16_t)config->report_rate_lp1);
+        LOG_DBG("Report rate LP1 set: %u ms", (uint16_t)config->report_rate_lp1);
     }
 
     if (config->report_rate_lp2 != -1) {
@@ -951,7 +1016,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Report rate LP2 write error: %d", ret);
             return ret;
         }
-        LOG_INF("Report rate LP2 set: %u ms", (uint16_t)config->report_rate_lp2);
+        LOG_DBG("Report rate LP2 set: %u ms", (uint16_t)config->report_rate_lp2);
     }
 
     // Timeout configuration (only if set in DT)
@@ -962,7 +1027,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Timeout active write error: %d", ret);
             return ret;
         }
-        LOG_INF("Timeout active set: %u s", (uint8_t)config->timeout_active);
+        LOG_DBG("Timeout active set: %u s", (uint8_t)config->timeout_active);
     }
 
     if (config->timeout_idle_touch != -1) {
@@ -972,7 +1037,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Timeout idle touch write error: %d", ret);
             return ret;
         }
-        LOG_INF("Timeout idle touch set: %u s", (uint8_t)config->timeout_idle_touch);
+        LOG_DBG("Timeout idle touch set: %u s", (uint8_t)config->timeout_idle_touch);
     }
 
     if (config->timeout_idle != -1) {
@@ -982,7 +1047,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Timeout idle write error: %d", ret);
             return ret;
         }
-        LOG_INF("Timeout idle set: %u s", (uint8_t)config->timeout_idle);
+        LOG_DBG("Timeout idle set: %u s", (uint8_t)config->timeout_idle);
     }
 
     if (config->timeout_lp1 != -1) {
@@ -992,7 +1057,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Timeout LP1 write error: %d", ret);
             return ret;
         }
-        LOG_INF("Timeout LP1 set: %u s", (uint8_t)config->timeout_lp1);
+        LOG_DBG("Timeout LP1 set: %u s", (uint8_t)config->timeout_lp1);
     }
 
     if (config->ref_update_time != -1) {
@@ -1002,7 +1067,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Ref update time write error: %d", ret);
             return ret;
         }
-        LOG_INF("Ref update time set: %u s", (uint8_t)config->ref_update_time);
+        LOG_DBG("Ref update time set: %u s", (uint8_t)config->ref_update_time);
     }
 
     // set configuration complete flag
@@ -1045,11 +1110,11 @@ static int check_reset_and_reconfigure(const struct device *dev) {
         }
     } while (ret < 0);
 
-    LOG_INF("Device ready after %d ms", wait_count * 100);
+    LOG_DBG("Device ready after %d ms", wait_count * 100);
 
     // after reset, set flag to acknowledge that reset was performed
     if (sys_info & TPS43_SHOW_RESET) {
-        LOG_INF("SHOW_RESET detected, sending ACK_RESET and enable ATI");
+        LOG_DBG("SHOW_RESET detected, sending ACK_RESET and enable ATI");
         ret = tps43_i2c_write_reg8(dev, TPS43_REG_SYSTEM_CONTROL_0, TPS43_ACK_RESET | TPS43_AUTO_ATI);
         if (ret != 0) {
             LOG_ERR("ACK_RESET send error: %d", ret);
@@ -1086,270 +1151,270 @@ static void tps43_dump_registers(const struct device *dev) {
     int ret = 0;
     int read_ret;
 
-    LOG_INF("Dumping TPS43 registers");
+    LOG_DBG("Dumping TPS43 registers");
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_SYSTEM_INFO_0, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SYSTEM_INFO_0 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_INFO_0, reg8);
+        LOG_DBG("SYSTEM_INFO_0 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_INFO_0, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_SYSTEM_INFO_1, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SYSTEM_INFO_1 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_INFO_1, reg8);
+        LOG_DBG("SYSTEM_INFO_1 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_INFO_1, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_SYSTEM_CONTROL_0, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SYSTEM_CONTROL_0 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_CONTROL_0, reg8);
+        LOG_DBG("SYSTEM_CONTROL_0 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_CONTROL_0, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_SYSTEM_CONTROL_1, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SYSTEM_CONTROL_1 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_CONTROL_1, reg8);
+        LOG_DBG("SYSTEM_CONTROL_1 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_CONTROL_1, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_SYSTEM_CONFIG_0, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SYSTEM_CONFIG_0 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_CONFIG_0, reg8);
+        LOG_DBG("SYSTEM_CONFIG_0 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_CONFIG_0, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_SYSTEM_CONFIG_1, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SYSTEM_CONFIG_1 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_CONFIG_1, reg8);
+        LOG_DBG("SYSTEM_CONFIG_1 (0x%04X): 0x%02X", TPS43_REG_SYSTEM_CONFIG_1, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_GLOBAL_ATI_C, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("GLOBAL_ATI_C (0x%04X): 0x%02X", TPS43_REG_GLOBAL_ATI_C, reg8);
+        LOG_DBG("GLOBAL_ATI_C (0x%04X): 0x%02X", TPS43_REG_GLOBAL_ATI_C, reg8);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_ATI_TARGET, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("ATI_TARGET (0x%04X): 0x%04X", TPS43_REG_ATI_TARGET, reg16);
+        LOG_DBG("ATI_TARGET (0x%04X): 0x%04X", TPS43_REG_ATI_TARGET, reg16);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_REF_DRIFT_LIMIT, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("REF_DRIFT_LIMIT (0x%04X): 0x%02X", TPS43_REG_REF_DRIFT_LIMIT, reg8);
+        LOG_DBG("REF_DRIFT_LIMIT (0x%04X): 0x%02X", TPS43_REG_REF_DRIFT_LIMIT, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_REATI_LOWER_LIMIT, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("REATI_LOWER_LIMIT (0x%04X): 0x%02X", TPS43_REG_REATI_LOWER_LIMIT, reg8);
+        LOG_DBG("REATI_LOWER_LIMIT (0x%04X): 0x%02X", TPS43_REG_REATI_LOWER_LIMIT, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_REATI_UPPER_LIMIT, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("REATI_UPPER_LIMIT (0x%04X): 0x%02X", TPS43_REG_REATI_UPPER_LIMIT, reg8);
+        LOG_DBG("REATI_UPPER_LIMIT (0x%04X): 0x%02X", TPS43_REG_REATI_UPPER_LIMIT, reg8);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_MAX_COUNT_LIMIT, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("MAX_COUNT_LIMIT (0x%04X): 0x%04X", TPS43_REG_MAX_COUNT_LIMIT, reg16);
+        LOG_DBG("MAX_COUNT_LIMIT (0x%04X): 0x%04X", TPS43_REG_MAX_COUNT_LIMIT, reg16);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_ATI_RETRY_TIME, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("ATI_RETRY_TIME (0x%04X): 0x%02X", TPS43_REG_ATI_RETRY_TIME, reg8);
+        LOG_DBG("ATI_RETRY_TIME (0x%04X): 0x%02X", TPS43_REG_ATI_RETRY_TIME, reg8);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_REPORT_RATE_ACTIVE, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("REPORT_RATE_ACTIVE (0x%04X): 0x%04X", TPS43_REG_REPORT_RATE_ACTIVE, reg16);
+        LOG_DBG("REPORT_RATE_ACTIVE (0x%04X): 0x%04X", TPS43_REG_REPORT_RATE_ACTIVE, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_REPORT_RATE_IDLE_TOUCH, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("REPORT_RATE_IDLE_TOUCH (0x%04X): 0x%04X", TPS43_REG_REPORT_RATE_IDLE_TOUCH, reg16);
+        LOG_DBG("REPORT_RATE_IDLE_TOUCH (0x%04X): 0x%04X", TPS43_REG_REPORT_RATE_IDLE_TOUCH, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_REPORT_RATE_IDLE, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("REPORT_RATE_IDLE (0x%04X): 0x%04X", TPS43_REG_REPORT_RATE_IDLE, reg16);
+        LOG_DBG("REPORT_RATE_IDLE (0x%04X): 0x%04X", TPS43_REG_REPORT_RATE_IDLE, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_REPORT_RATE_LP1, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("REPORT_RATE_LP1 (0x%04X): 0x%04X", TPS43_REG_REPORT_RATE_LP1, reg16);
+        LOG_DBG("REPORT_RATE_LP1 (0x%04X): 0x%04X", TPS43_REG_REPORT_RATE_LP1, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_REPORT_RATE_LP2, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("REPORT_RATE_LP2 (0x%04X): 0x%04X", TPS43_REG_REPORT_RATE_LP2, reg16);
+        LOG_DBG("REPORT_RATE_LP2 (0x%04X): 0x%04X", TPS43_REG_REPORT_RATE_LP2, reg16);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_TIMEOUT_ACTIVE, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("TIMEOUT_ACTIVE (0x%04X): 0x%02X", TPS43_REG_TIMEOUT_ACTIVE, reg8);
+        LOG_DBG("TIMEOUT_ACTIVE (0x%04X): 0x%02X", TPS43_REG_TIMEOUT_ACTIVE, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_TIMEOUT_IDLE_TOUCH, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("TIMEOUT_IDLE_TOUCH (0x%04X): 0x%02X", TPS43_REG_TIMEOUT_IDLE_TOUCH, reg8);
+        LOG_DBG("TIMEOUT_IDLE_TOUCH (0x%04X): 0x%02X", TPS43_REG_TIMEOUT_IDLE_TOUCH, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_TIMEOUT_IDLE, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("TIMEOUT_IDLE (0x%04X): 0x%02X", TPS43_REG_TIMEOUT_IDLE, reg8);
+        LOG_DBG("TIMEOUT_IDLE (0x%04X): 0x%02X", TPS43_REG_TIMEOUT_IDLE, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_TIMEOUT_LP1, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("TIMEOUT_LP1 (0x%04X): 0x%02X", TPS43_REG_TIMEOUT_LP1, reg8);
+        LOG_DBG("TIMEOUT_LP1 (0x%04X): 0x%02X", TPS43_REG_TIMEOUT_LP1, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_REF_UPDATE_TIME, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("REF_UPDATE_TIME (0x%04X): 0x%02X", TPS43_REG_REF_UPDATE_TIME, reg8);
+        LOG_DBG("REF_UPDATE_TIME (0x%04X): 0x%02X", TPS43_REG_REF_UPDATE_TIME, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_XY_STATIC_BETA, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("XY_STATIC_BETA (0x%04X): 0x%02X", TPS43_REG_XY_STATIC_BETA, reg8);
+        LOG_DBG("XY_STATIC_BETA (0x%04X): 0x%02X", TPS43_REG_XY_STATIC_BETA, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_ALP_COUNT_BETA, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("ALP_COUNT_BETA (0x%04X): 0x%02X", TPS43_REG_ALP_COUNT_BETA, reg8);
+        LOG_DBG("ALP_COUNT_BETA (0x%04X): 0x%02X", TPS43_REG_ALP_COUNT_BETA, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_ALP1_LTA_BETA, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("ALP1_LTA_BETA (0x%04X): 0x%02X", TPS43_REG_ALP1_LTA_BETA, reg8);
+        LOG_DBG("ALP1_LTA_BETA (0x%04X): 0x%02X", TPS43_REG_ALP1_LTA_BETA, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_ALP2_LTA_BETA, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("ALP2_LTA_BETA (0x%04X): 0x%02X", TPS43_REG_ALP2_LTA_BETA, reg8);
+        LOG_DBG("ALP2_LTA_BETA (0x%04X): 0x%02X", TPS43_REG_ALP2_LTA_BETA, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_XY_DYNAMIC_FILTER_BOTTOM, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("XY_DYNAMIC_FILTER_BOTTOM (0x%04X): 0x%02X", TPS43_REG_XY_DYNAMIC_FILTER_BOTTOM, reg8);
+        LOG_DBG("XY_DYNAMIC_FILTER_BOTTOM (0x%04X): 0x%02X", TPS43_REG_XY_DYNAMIC_FILTER_BOTTOM, reg8);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_XY_DYNAMIC_FILTER_LOWER, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("XY_DYNAMIC_FILTER_LOWER (0x%04X): 0x%02X", TPS43_REG_XY_DYNAMIC_FILTER_LOWER, reg8);
+        LOG_DBG("XY_DYNAMIC_FILTER_LOWER (0x%04X): 0x%02X", TPS43_REG_XY_DYNAMIC_FILTER_LOWER, reg8);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_XY_DYNAMIC_FILTER_UPPER, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("XY_DYNAMIC_FILTER_UPPER (0x%04X): 0x%04X", TPS43_REG_XY_DYNAMIC_FILTER_UPPER, reg16);
+        LOG_DBG("XY_DYNAMIC_FILTER_UPPER (0x%04X): 0x%04X", TPS43_REG_XY_DYNAMIC_FILTER_UPPER, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_X_RESOLUTION, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("X_RESOLUTION (0x%04X): 0x%04X", TPS43_REG_X_RESOLUTION, reg16);
+        LOG_DBG("X_RESOLUTION (0x%04X): 0x%04X", TPS43_REG_X_RESOLUTION, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_Y_RESOLUTION, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("Y_RESOLUTION (0x%04X): 0x%04X", TPS43_REG_Y_RESOLUTION, reg16);
+        LOG_DBG("Y_RESOLUTION (0x%04X): 0x%04X", TPS43_REG_Y_RESOLUTION, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_TAP_TIME, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("TAP_TIME (0x%04X): %u ms", TPS43_REG_TAP_TIME, reg16);
+        LOG_DBG("TAP_TIME (0x%04X): %u ms", TPS43_REG_TAP_TIME, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_TAP_DISTANCE, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("TAP_DISTANCE (0x%04X): %u px", TPS43_REG_TAP_DISTANCE, reg16);
+        LOG_DBG("TAP_DISTANCE (0x%04X): %u px", TPS43_REG_TAP_DISTANCE, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_HOLD_TIME, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("HOLD_TIME (0x%04X): %u ms", TPS43_REG_HOLD_TIME, reg16);
+        LOG_DBG("HOLD_TIME (0x%04X): %u ms", TPS43_REG_HOLD_TIME, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_SWIPE_INITIAL_TIME, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SWIPE_INITIAL_TIME (0x%04X): %u ms", TPS43_REG_SWIPE_INITIAL_TIME, reg16);
+        LOG_DBG("SWIPE_INITIAL_TIME (0x%04X): %u ms", TPS43_REG_SWIPE_INITIAL_TIME, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_SWIPE_INITIAL_DISTANCE, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SWIPE_INITIAL_DISTANCE (0x%04X): %u px", TPS43_REG_SWIPE_INITIAL_DISTANCE, reg16);
+        LOG_DBG("SWIPE_INITIAL_DISTANCE (0x%04X): %u px", TPS43_REG_SWIPE_INITIAL_DISTANCE, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_SWIPE_CONSECUTIVE_TIME, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SWIPE_CONSECUTIVE_TIME (0x%04X): %u ms", TPS43_REG_SWIPE_CONSECUTIVE_TIME, reg16);
+        LOG_DBG("SWIPE_CONSECUTIVE_TIME (0x%04X): %u ms", TPS43_REG_SWIPE_CONSECUTIVE_TIME, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_SWIPE_CONSECUTIVE_DISTANCE, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SWIPE_CONSECUTIVE_DISTANCE (0x%04X): %u px", TPS43_REG_SWIPE_CONSECUTIVE_DISTANCE, reg16);
+        LOG_DBG("SWIPE_CONSECUTIVE_DISTANCE (0x%04X): %u px", TPS43_REG_SWIPE_CONSECUTIVE_DISTANCE, reg16);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_SWIPE_ANGLE, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SWIPE_ANGLE (0x%04X): 0x%02X", TPS43_REG_SWIPE_ANGLE, reg8);
+        LOG_DBG("SWIPE_ANGLE (0x%04X): 0x%02X", TPS43_REG_SWIPE_ANGLE, reg8);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_SCROLL_INITIAL_DISTANCE, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SCROLL_INITIAL_DISTANCE (0x%04X): %u px", TPS43_REG_SCROLL_INITIAL_DISTANCE, reg16);
+        LOG_DBG("SCROLL_INITIAL_DISTANCE (0x%04X): %u px", TPS43_REG_SCROLL_INITIAL_DISTANCE, reg16);
     }
 
     read_ret = tps43_i2c_read_reg8(dev, TPS43_REG_SCROLL_ANGLE, &reg8);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("SCROLL_ANGLE (0x%04X): 0x%02X", TPS43_REG_SCROLL_ANGLE, reg8);
+        LOG_DBG("SCROLL_ANGLE (0x%04X): 0x%02X", TPS43_REG_SCROLL_ANGLE, reg8);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_ZOOM_INITIAL_DISTANCE, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("ZOOM_INITIAL_DISTANCE (0x%04X): %u px", TPS43_REG_ZOOM_INITIAL_DISTANCE, reg16);
+        LOG_DBG("ZOOM_INITIAL_DISTANCE (0x%04X): %u px", TPS43_REG_ZOOM_INITIAL_DISTANCE, reg16);
     }
 
     read_ret = tps43_i2c_read_reg16(dev, TPS43_REG_ZOOM_CONSECUTIVE_DISTANCE, &reg16);
     ret |= read_ret;
     if (read_ret == 0) {
-        LOG_INF("ZOOM_CONSECUTIVE_DISTANCE (0x%04X): %u px", TPS43_REG_ZOOM_CONSECUTIVE_DISTANCE, reg16);
+        LOG_DBG("ZOOM_CONSECUTIVE_DISTANCE (0x%04X): %u px", TPS43_REG_ZOOM_CONSECUTIVE_DISTANCE, reg16);
     }
 
     if (ret != 0) {
@@ -1382,7 +1447,7 @@ static int tps43_init(const struct device *dev) {
     k_work_init(&drv_data->work, tps43_work_handler);
 
 
-    LOG_INF("=== Azoteq tps43 driver for device %s ===", dev->name);
+    LOG_DBG("=== Azoteq tps43 driver for device %s ===", dev->name);
 
     // Check I2C bus
     if (!device_is_ready(config->i2c_bus.bus)) {
@@ -1390,8 +1455,8 @@ static int tps43_init(const struct device *dev) {
         return -ENODEV;
     }
 
-    LOG_INF("I2C bus: %s", config->i2c_bus.bus->name);
-    LOG_INF("I2C address: 0x%02x", config->i2c_bus.addr);
+    LOG_DBG("I2C bus: %s", config->i2c_bus.bus->name);
+    LOG_DBG("I2C address: 0x%02x", config->i2c_bus.addr);
 
     ret = tps43_reset_values(dev);
     if (ret != 0) {
@@ -1412,7 +1477,7 @@ static int tps43_init(const struct device *dev) {
         gpio_pin_set_dt(&config->rst_gpio, 1);
         k_sleep(K_MSEC(610));
 
-        LOG_INF("Hardware reset completed");
+        LOG_DBG("Hardware reset completed");
     }
 
     // check SHOW_RESET and configure
@@ -1446,10 +1511,12 @@ static int tps43_init(const struct device *dev) {
         if (gpio_pin_get_dt(&config->rdy_gpio) > 0) {
             k_work_submit(&drv_data->work);
         }
-        LOG_INF("RDY interrupt configured");
+        LOG_DBG("RDY interrupt configured");
     }
 
-    LOG_INF("TPS43 driver successfully initialized");
+    diag_dev = dev;
+    atomic_set(&diag_online, 1);
+    LOG_INF("TPS43 diagnostic build based on v2: initialized");
     return 0;
 }
 

@@ -1,0 +1,42 @@
+対象
+  junskwlk/zmk-config-rolio の e73-sofle ブランチ
+  確認した元コミット: ff6b31d
+  beekeeb/zmk_driver_azoteq の固定コミットを同梱し、独自の三本指判定を追加。
+
+操作
+  三本指で素早く上へ払う: Mission Control (Control + 上矢印)
+  三本指で横または下になぞる: 小さな移動の後、左ドラッグ
+  三本指で上になぞる: 最大250msの判定待ちの後、左ドラッグ
+  ドラッグ中: 上下左右どこへ動かしてもドラッグを継続
+  指が三本でなくなった時点: 左ボタンを解除
+  次の三本指操作: すべての指を離してから開始
+
+制約
+  素早い上方向へのドラッグと上スワイプは同じ入力なので区別できない。
+  この変更では素早い上移動をMission Controlとして扱う。
+  上へドラッグするときは、約250ms待つか、少し横へ動かしてから上へ動かす。
+  Apple純正の三本指ドラッグと同じ使用感を保証するものではない。
+
+適用とビルド
+  e73-sofleブランチの作業コピーのルートで:
+    git apply --check /path/to/sofle-three-finger.patch
+    git apply /path/to/sofle-three-finger.patch
+
+  GitHubへ変更を反映すると、既存のBuild ZMK firmwareワークフローでビルドされる。
+  左右両方のファームウェアに変更があるため、左右両方のUF2が必要。
+  Actionsの生成物: nice_sofle_left_vista508、nice_sofle_right_touchpad
+  設定初期化用のsettings_resetは、この変更の適用には不要。
+
+調整
+  config/boards/shields/sofle/sofle_right.overlay:
+    three-finger-hold-ms: 上移動をスワイプとみなす時間窓 (初期250ms)
+    three-finger-swipe-distance: 上スワイプ成立までのセンサー移動量 (初期150)
+    three-finger-drag-distance: 横・下ドラッグ開始までの移動量 (初期20)
+    gesture-transform: 左側のXY変換と同じ値にする
+
+検証状況
+  C言語の状態遷移テストをAddressSanitizer/UndefinedBehaviorSanitizer付きで実行済み。
+  連続発火防止、横・下ドラッグ、遅い上ドラッグ、部分的な指離れ、全指離れ、
+  読み取り失敗や休止時のキャンセル、既存の座標変換との整合を検証。
+  この環境にはZephyrビルド環境がないため、左右UF2のビルドと実機検証は未実施。
+  完成ファームウェアではなく、ビルド・実機確認が必要な変更案。

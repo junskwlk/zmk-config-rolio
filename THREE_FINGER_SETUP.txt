@@ -38,5 +38,6 @@
   C言語の状態遷移テストをAddressSanitizer/UndefinedBehaviorSanitizer付きで実行済み。
   連続発火防止、横・下ドラッグ、遅い上ドラッグ、部分的な指離れ、全指離れ、
   読み取り失敗や休止時のキャンセル、既存の座標変換との整合を検証。
-  この環境にはZephyrビルド環境がないため、左右UF2のビルドと実機検証は未実施。
-  完成ファームウェアではなく、ビルド・実機確認が必要な変更案。
+  左右UF2のGitHub Actionsビルドは成功。実機検証は未実施。
+  成功したビルド: https://github.com/junskwlk/zmk-config-rolio/actions/runs/44886853614
+  ファームウェアのソースコミット: ef7491cdb5967f8baefa532c8f1fb66d78dee527

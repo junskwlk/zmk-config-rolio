@@ -18,6 +18,14 @@
 
 LOG_MODULE_REGISTER(tps43, CONFIG_INPUT_LOG_LEVEL);
 
+/* input_report(K_FOREVER) can wait for the input thread, which forwards to BLE.
+ * BLE completion and ZMK activity work need the system queue to remain runnable.
+ * Never run the sensor producer on that same queue.
+ */
+static struct k_work_q tps43_work_q;
+K_THREAD_STACK_DEFINE(tps43_work_stack, 2048);
+static bool tps43_work_q_started;
+
 /* Diagnostic-only build: atomics allow observation without taking the driver's lock.
  * No polling reads, resets, or timeout changes are added to the sensor path.
  * stage: 0 idle, 1 lock, 2 I2C read, 3 processing, 4 input report, 5 end window.
@@ -250,7 +258,7 @@ static int tps43_i2c_write_reg8(const struct device *dev, uint16_t reg, uint8_t 
      struct tps43_drv_data *drv_data = CONTAINER_OF(cb, struct tps43_drv_data, rdy_cb);
 
      atomic_inc(&diag_irq);
-     k_work_submit(&drv_data->work);
+     k_work_submit_to_queue(&tps43_work_q, &drv_data->work);
  }
 
 
@@ -1454,6 +1462,12 @@ static int tps43_init(const struct device *dev) {
     /* GPIO callbacks can run as soon as the interrupt is enabled. */
     k_sem_init(&drv_data->lock, 1, 1);
     k_work_init(&drv_data->work, tps43_work_handler);
+    if (!tps43_work_q_started) {
+        static const struct k_work_queue_config queue_config = {.name = "TPS43 input"};
+        k_work_queue_start(&tps43_work_q, tps43_work_stack,
+                           K_THREAD_STACK_SIZEOF(tps43_work_stack), 1, &queue_config);
+        tps43_work_q_started = true;
+    }
 
 
     LOG_DBG("=== Azoteq tps43 driver for device %s ===", dev->name);
@@ -1518,14 +1532,14 @@ static int tps43_init(const struct device *dev) {
         }
         /* RDY may already be active when edge interrupts are armed. */
         if (gpio_pin_get_dt(&config->rdy_gpio) > 0) {
-            k_work_submit(&drv_data->work);
+            k_work_submit_to_queue(&tps43_work_q, &drv_data->work);
         }
         LOG_DBG("RDY interrupt configured");
     }
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 protocol diagnostic v3: initialized");
+    LOG_INF("TPS43 dedicated workqueue diagnostic v4: initialized");
     return 0;
 }
 

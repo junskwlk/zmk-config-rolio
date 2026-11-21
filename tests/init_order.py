@@ -27,6 +27,17 @@ struct device { const char *name; void *data; const void *config; };
 struct gpio { const void *port; unsigned pin; };
 struct k_sem { bool ready; };
 struct k_work { bool ready; };
+struct k_work_q { bool ready; };
+struct k_work_queue_config { const char *name; };
+static struct k_work_q tps43_work_q;
+static char tps43_work_stack[2048];
+static bool tps43_work_q_started;
+#define K_THREAD_STACK_SIZEOF(stack) sizeof(stack)
+static void k_work_queue_start(struct k_work_q *q, void *stack, size_t size,
+                                int priority, const struct k_work_queue_config *cfg) {
+    assert(stack == tps43_work_stack && size == 2048 && priority == 1 && cfg->name);
+    q->ready = true;
+}
 struct gpio_callback { bool ready; };
 struct tps43_drv_data {
     const struct device *dev;
@@ -53,11 +64,12 @@ static void tps43_work_handler(void) {}
 static void k_work_init(struct k_work *w, void (*handler)(void)) {
     assert(handler != NULL); w->ready = true;
 }
-static int k_work_submit(struct k_work *w) {
+static int k_work_submit_to_queue(struct k_work_q *q, struct k_work *w) {
+    assert(q == &tps43_work_q && q->ready);
     assert(w->ready && active->lock.ready && active->initialized);
     submitted++; return 0;
 }
-static void tps43_rdy_callback(void) { k_work_submit(&active->work); }
+static void tps43_rdy_callback(void) { k_work_submit_to_queue(&tps43_work_q, &active->work); }
 static int tps43_reset_values(const struct device *dev) {
     (void)dev; active->initialized = false; return 0;
 }

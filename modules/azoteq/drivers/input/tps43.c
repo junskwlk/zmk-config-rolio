@@ -73,20 +73,20 @@ K_THREAD_DEFINE(tps43_diagnostic_thread, 1536, diag_heartbeat, NULL, NULL, NULL,
  * @brief Ends communication window with trackpad
  *
  * After each read of trackpad registers, it is necessary to end the communication window
- * by writing the special address 0xEEEE, which causes a NACK from the device.
+ * by writing one data byte at address 0xEEEE, followed by STOP (datasheet 8.7).
  * This is a mandatory step according to the IQS5xx protocol.
  *
  * @param dev Pointer to trackpad device
  */
 static void tps43_end_communication_window(const struct device *dev) {
     const struct tps43_config *config = dev->config;
-    uint8_t end_buf[2];
+    uint8_t end_buf[3] = {0};
 
     sys_put_be16(TPS43_REG_END_COMM_WINDOW, end_buf);
 
     int ret = i2c_write_dt(&config->i2c_bus, end_buf, sizeof(end_buf));
     if (ret != 0 && ret != -EIO) {
-        LOG_DBG("End communication window write returned: %d (NACK expected)", ret);
+        LOG_DBG("End communication window write returned: %d", ret);
     }
 }
 
@@ -435,6 +435,12 @@ static void tps43_work_handler(struct k_work *work) {
     atomic_set(&diag_stage, 1);
     k_sem_take(&drv_data->lock, K_FOREVER);
     atomic_set(&diag_stage, 2);
+    /* An edge queued during the previous read can be stale by worker entry. */
+    if (config->rdy_gpio.port && gpio_pin_get_dt(&config->rdy_gpio) <= 0) {
+        k_sem_give(&drv_data->lock);
+        atomic_set(&diag_stage, 0);
+        return;
+    }
 
     /*
      * Read the whole contiguous block from GESTURE_EVENTS_0 through REL_Y in a
@@ -451,6 +457,12 @@ static void tps43_work_handler(struct k_work *work) {
     uint8_t touch_data[(TPS43_REG_REL_Y + 2) - TPS43_REG_GESTURE_EVENTS_0];
     ret = read_sequence_registers(dev, TPS43_REG_GESTURE_EVENTS_0, touch_data,
                                   sizeof(touch_data));
+    /* End the sensor transaction before any potentially blocking input reports.
+     * Never send an extra end command later: RDY may then belong to a new frame.
+     */
+    atomic_set(&diag_stage, 5);
+    tps43_end_communication_window(dev);
+    atomic_set(&diag_stage, 3);
     if (ret < 0) {
         atomic_inc(&diag_errors);
         LOG_ERR("Touch data read error: %d", ret);
@@ -614,9 +626,6 @@ done:
     // Save for next call
     atomic_set(&diag_phase, drv_data->gesture.phase);
     drv_data->drag_active = is_drag_active;
-    atomic_set(&diag_stage, 5);
-    tps43_end_communication_window(dev);
-
     // Release semaphore after completing all I2C operations
     k_sem_give(&drv_data->lock);
     atomic_set(&diag_stage, 0);
@@ -1516,7 +1525,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 diagnostic build based on v2: initialized");
+    LOG_INF("TPS43 protocol diagnostic v3: initialized");
     return 0;
 }
 

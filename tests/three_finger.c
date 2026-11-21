@@ -15,6 +15,10 @@ int main(void) {
     /* Single-finger motion and two-finger scrolling stay with the existing driver. */
     assert(!step(&s, 1, 20, -20, 0).consume);
     assert(!step(&s, 2, 20, -20, 10).consume);
+    /* I2C errors with no active gesture must leave normal pointing available. */
+    assert(!tps43_gesture_cancel(&s));
+    assert(s.phase == TPS43_G_IDLE);
+    assert(!step(&s, 1, 20, -20, 15).consume);
 
     /* Accumulate a quick upward swipe; emit once, with no cursor movement. */
     r = step(&s, 3, 0, -70, 20);

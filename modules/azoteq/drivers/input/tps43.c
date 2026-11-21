@@ -1377,6 +1377,10 @@ static int tps43_init(const struct device *dev) {
     int ret;
 
     drv_data->dev = dev;
+    /* GPIO callbacks can run as soon as the interrupt is enabled. */
+    k_sem_init(&drv_data->lock, 1, 1);
+    k_work_init(&drv_data->work, tps43_work_handler);
+
 
     LOG_INF("=== Azoteq tps43 driver for device %s ===", dev->name);
 
@@ -1418,38 +1422,32 @@ static int tps43_init(const struct device *dev) {
         return ret;
     }
 
-    // configure RDY interrupts only AFTER device configuration!
-    if (config->rdy_gpio.port != NULL) {
-        ret = gpio_pin_configure_dt(&config->rdy_gpio, GPIO_INPUT);
-        if (ret != 0) {
-            LOG_WRN("RDY GPIO configuration error: %d", ret);
-        } else {
-            ret = gpio_pin_interrupt_configure_dt(&config->rdy_gpio,
-                                                    GPIO_INT_EDGE_TO_ACTIVE);
-            if (ret == 0) {
-                gpio_init_callback(&drv_data->rdy_cb, tps43_rdy_callback,
-                                    BIT(config->rdy_gpio.pin));
-                ret = gpio_add_callback(config->rdy_gpio.port, &drv_data->rdy_cb);
-                if (ret == 0) {
-                    LOG_INF("RDY interrupt configured");
-                } else {
-                    LOG_WRN("RDY callback add error: %d", ret);
-                }
-            }
-        }
-    }
-
+    /* Finish all synchronous I2C setup before an interrupt can queue the worker. */
+    tps43_dump_registers(dev);
     drv_data->initialized = true;
     drv_data->suspended = false;
 
-    // Initialize semaphore to protect I2C operations
-    // First parameter - initial count (1 = available)
-    // Second parameter - maximum count (1 = binary semaphore)
-    k_sem_init(&drv_data->lock, 1, 1);
-
-    k_work_init(&drv_data->work, tps43_work_handler);
-
-    tps43_dump_registers(dev);
+    if (config->rdy_gpio.port != NULL) {
+        ret = gpio_pin_configure_dt(&config->rdy_gpio, GPIO_INPUT);
+        if (ret != 0) {
+            return ret;
+        }
+        gpio_init_callback(&drv_data->rdy_cb, tps43_rdy_callback,
+                           BIT(config->rdy_gpio.pin));
+        ret = gpio_add_callback(config->rdy_gpio.port, &drv_data->rdy_cb);
+        if (ret != 0) {
+            return ret;
+        }
+        ret = gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+        if (ret != 0) {
+            return ret;
+        }
+        /* RDY may already be active when edge interrupts are armed. */
+        if (gpio_pin_get_dt(&config->rdy_gpio) > 0) {
+            k_work_submit(&drv_data->work);
+        }
+        LOG_INF("RDY interrupt configured");
+    }
 
     LOG_INF("TPS43 driver successfully initialized");
     return 0;

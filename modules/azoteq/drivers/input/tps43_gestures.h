@@ -22,6 +22,10 @@ struct tps43_gesture_result {
 };
 
 static inline bool tps43_gesture_cancel(struct tps43_gesture *s) {
+    /* A transient read failure during ordinary pointing must not latch a gesture. */
+    if (s->phase == TPS43_G_IDLE) {
+        return false;
+    }
     bool release = s->phase == TPS43_G_DRAG;
     *s = (struct tps43_gesture){.phase = TPS43_G_CANCELLED};
     return release;

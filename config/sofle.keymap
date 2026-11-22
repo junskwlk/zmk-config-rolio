@@ -25,9 +25,23 @@
 #define FN  2
 #define HOTKEY  3
 
-/* Runs on the left/central half after the right half forwards three-finger double-tap events. */
+/* Gesture shortcuts run on the central half after split input forwarding. */
 / {
     behaviors {
+        browser_back: browser_back {
+            compatible = "zmk,behavior-macro";
+            #binding-cells = <0>;
+            tap-ms = <30>;
+            wait-ms = <0>;
+            bindings = <&macro_tap &kp LG(LBKT)>;
+        };
+        browser_forward: browser_forward {
+            compatible = "zmk,behavior-macro";
+            #binding-cells = <0>;
+            tap-ms = <30>;
+            wait-ms = <0>;
+            bindings = <&macro_tap &kp LG(RBKT)>;
+        };
         mission_control: mission_control {
             compatible = "zmk,behavior-macro";
             #binding-cells = <0>;
@@ -42,7 +56,7 @@
             compatible = "zmk,input-processor-behaviors";
             #input-processor-cells = <0>;
             codes = <INPUT_BTN_NORTH INPUT_BTN_SOUTH INPUT_BTN_WEST INPUT_BTN_EAST>;
-            bindings = <&mission_control &none &none &none>;
+            bindings = <&mission_control &none &browser_back &browser_forward>;
         };
     };
 };

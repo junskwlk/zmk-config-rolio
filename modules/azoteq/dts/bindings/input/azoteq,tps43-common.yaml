@@ -425,3 +425,25 @@ properties:
       Sets the minimum duration a finger must be held to trigger a hold gesture.
       Written to the HOLD_TIME register (0x06BD).
       Only written if explicitly set.
+
+  two-finger-navigation:
+    type: boolean
+    description: Quick horizontal two-finger strokes navigate; waiting selects scrolling.
+
+  two-finger-scroll-delay-ms:
+    type: int
+    default: 250
+    description: Time from two-finger contact after which motion always scrolls.
+
+  two-finger-navigation-distance:
+    type: int
+    default: 80
+    description: Minimum horizontal sensor travel for one navigation action.
+
+  two-finger-navigation-swap-xy:
+    type: boolean
+    description: Swap sensor axes only for navigation direction classification.
+
+  two-finger-navigation-invert-x:
+    type: boolean
+    description: Invert horizontal navigation direction after the navigation axis swap.

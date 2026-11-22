@@ -91,7 +91,13 @@
 
     scroll;
     invert-scroll-y;
-    swipes;
+    /* Quick horizontal strokes navigate; a deliberate pause keeps scrolling. */
+    two-finger-navigation;
+    two-finger-scroll-delay-ms = <250>;
+    two-finger-navigation-distance = <80>;
+    /* Match the listener's screen X = -sensor Y, screen Y = sensor X. */
+    two-finger-navigation-swap-xy;
+    two-finger-navigation-invert-x;
     three-finger-drag;
     three-finger-hold-ms = <250>;
     three-finger-drag-distance = <12>;

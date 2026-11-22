@@ -6,6 +6,7 @@
 #include <zephyr/drivers/i2c.h>
 #include <stdint.h>
 #include "tps43_gestures.h"
+#include "tps43_two_finger.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -209,6 +210,11 @@ struct tps43_config {
     bool scroll;
     bool zoom;
     bool swipes;
+    bool two_finger_navigation;
+    bool two_finger_navigation_swap_xy;
+    bool two_finger_navigation_invert_x;
+    uint32_t two_finger_scroll_delay_ms;
+    uint32_t two_finger_navigation_distance;
     bool three_finger_drag;
     uint32_t three_finger_hold_ms;
     uint32_t three_finger_drag_distance;
@@ -272,6 +278,7 @@ struct tps43_drv_data {
     bool initialized;
     bool drag_active;
     struct tps43_gesture gesture;
+    struct tps43_two_finger two_finger;
     bool suspended;
     bool touching;
 };

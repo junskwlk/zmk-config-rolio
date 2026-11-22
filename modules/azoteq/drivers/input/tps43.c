@@ -284,6 +284,7 @@ static void tps43_cancel_gesture(const struct device *dev) {
         diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
     }
     data->drag_active = false;
+    tps43_two_cancel(&data->two_finger);
 }
 
 /**
@@ -409,6 +410,23 @@ static void tps43_handle_swipe(const struct device *dev, int16_t rel_x, int16_t 
     }
 }
 
+/* Preserve the existing sensitivity, axis selection and listener transform. */
+static void tps43_report_scroll(const struct device *dev, int32_t rel_x, int32_t rel_y) {
+    const struct tps43_config *config = dev->config;
+    int64_t x = rel_x, y = rel_y;
+    if (llabs(x) > llabs(y)) {
+        if (config->invert_scroll_x) { x = -x; }
+        int64_t wheel = (x * config->scroll_sensitivity) / 100;
+        diag_report_rel(dev, INPUT_REL_HWHEEL, CLAMP(wheel, INT16_MIN, INT16_MAX),
+                        true, K_FOREVER);
+    } else {
+        if (config->invert_scroll_y) { y = -y; }
+        int64_t wheel = (y * config->scroll_sensitivity) / 100;
+        diag_report_rel(dev, INPUT_REL_WHEEL, CLAMP(wheel, INT16_MIN, INT16_MAX),
+                        true, K_FOREVER);
+    }
+}
+
 /**
  * @brief Main work handler for processing trackpad events
  *
@@ -497,6 +515,17 @@ static void tps43_work_handler(struct k_work *work) {
         diag_report_key(dev, INPUT_BTN_TOUCH, is_touching ? 1 : 0, true, K_FOREVER);
     }
 
+    struct tps43_two_result two = {0};
+    if (config->two_finger_navigation) {
+        two = tps43_two_update(&drv_data->two_finger, num_fingers, rel_x, rel_y,
+                              gestures_events[1] & TPS43_SCROLL,
+                              gestures_events[1] & TPS43_ZOOM, k_uptime_get(),
+                              config->two_finger_scroll_delay_ms,
+                              config->two_finger_navigation_distance,
+                              config->two_finger_navigation_swap_xy,
+                              config->two_finger_navigation_invert_x);
+    }
+
     if (config->three_finger_drag) {
         int32_t gx = rel_x, gy = rel_y;
         struct tps43_gesture_result gesture = tps43_gesture_update(
@@ -531,6 +560,29 @@ static void tps43_work_handler(struct k_work *work) {
             }
             goto done;
         }
+    }
+
+    if (two.consume) {
+        if (is_drag_active) {
+            diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+            is_drag_active = false;
+        }
+        if (two.back || two.forward) {
+            uint16_t code = two.back ? INPUT_BTN_WEST : INPUT_BTN_EAST;
+            LOG_INF("Two-finger quick swipe -> %s", two.back ? "back" : "forward");
+            diag_report_key(dev, code, 1, true, K_FOREVER);
+            diag_report_key(dev, code, 0, true, K_FOREVER);
+        }
+        if (two.scroll_x || two.scroll_y) {
+            tps43_report_scroll(dev, two.scroll_x, two.scroll_y);
+        }
+        /* A hardware right-click may arrive during a staggered finger lift. */
+        if (drv_data->two_finger.tap_possible &&
+            (gestures_events[1] & TPS43_TWO_FINGER_TAP)) {
+            diag_report_key(dev, INPUT_BTN_1, 1, true, K_FOREVER);
+            diag_report_key(dev, INPUT_BTN_1, 0, true, K_FOREVER);
+        }
+        goto done;
     }
 
     if (gestures_events[0] != 0 || gestures_events[1] != 0) {
@@ -585,24 +637,7 @@ static void tps43_work_handler(struct k_work *work) {
         }
 
         if (is_scroll_active) {
-            // Scroll processing: keep only dominant axis
-            if (abs(rel_x) > abs(rel_y)) {
-                // Horizontal scroll
-                if (config->invert_scroll_x) {
-                    rel_x = -rel_x;
-                }
-                int16_t wheel = (rel_x * config->scroll_sensitivity) / 100;
-                LOG_DBG("Scrolling %d horizontally", wheel);
-                diag_report_rel(dev, INPUT_REL_HWHEEL, wheel, true, K_FOREVER);
-            } else {
-                // Vertical scroll
-                if (config->invert_scroll_y) {
-                    rel_y = -rel_y;
-                }
-                int16_t wheel = (rel_y * config->scroll_sensitivity) / 100;
-                LOG_DBG("Scrolling %d vertically", wheel);
-                diag_report_rel(dev, INPUT_REL_WHEEL, wheel, true, K_FOREVER);
-            }
+            tps43_report_scroll(dev, rel_x, rel_y);
             is_scroll_active = false;
         } else if (is_zoom_active) {
             // Zoom processing: the zoom amount comes in via rel_x
@@ -652,6 +687,7 @@ static int tps43_reset_values(const struct device *dev) {
     drv_data->initialized = false;
     drv_data->drag_active = false;
     drv_data->gesture = (struct tps43_gesture){0};
+    drv_data->two_finger = (struct tps43_two_finger){0};
 
     LOG_DBG("Values reset");
     return 0;
@@ -1536,7 +1572,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 v5: all-direction drag and three-finger double tap");
+    LOG_INF("TPS43 v13: quick two-finger navigation / delayed scrolling");
     return 0;
 }
 
@@ -1555,10 +1591,15 @@ static int tps43_init(const struct device *dev) {
         .rst_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, rst_gpios, {0}),                                  \
         .single_tap = DT_INST_PROP(inst, single_tap),                                                \
         .press_and_hold = DT_INST_PROP(inst, press_and_hold),                                        \
-        .two_finger_tap = DT_INST_PROP(inst, two_finger_tap),                                        \
+        .two_finger_tap = DT_INST_PROP(inst, two_finger_tap),                                       \
         .scroll = DT_INST_PROP(inst, scroll),                                                        \
         .zoom = DT_INST_PROP(inst, zoom),                                                            \
         .swipes = DT_INST_PROP(inst, swipes),                                                        \
+        .two_finger_navigation = DT_INST_PROP(inst, two_finger_navigation),                         \
+        .two_finger_navigation_swap_xy = DT_INST_PROP(inst, two_finger_navigation_swap_xy),         \
+        .two_finger_navigation_invert_x = DT_INST_PROP(inst, two_finger_navigation_invert_x),       \
+        .two_finger_scroll_delay_ms = DT_INST_PROP(inst, two_finger_scroll_delay_ms),               \
+        .two_finger_navigation_distance = DT_INST_PROP(inst, two_finger_navigation_distance),       \
         .three_finger_drag = DT_INST_PROP(inst, three_finger_drag),                                  \
         .three_finger_hold_ms = DT_INST_PROP(inst, three_finger_hold_ms),                            \
         .three_finger_drag_distance = DT_INST_PROP(inst, three_finger_drag_distance),                \

@@ -279,6 +279,8 @@ struct tps43_drv_data {
     bool drag_active;
     struct tps43_gesture gesture;
     struct tps43_two_finger two_finger;
+    bool pinch_contact;
+    int32_t pinch_remainder;
     bool suspended;
     bool touching;
 };

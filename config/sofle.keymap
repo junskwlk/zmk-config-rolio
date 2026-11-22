@@ -52,6 +52,12 @@
     };
 
     input_processors {
+        sofle_pinch_modifier: sofle_pinch_modifier {
+            compatible = "zmk,input-processor-behaviors";
+            #input-processor-cells = <0>;
+            codes = <INPUT_BTN_SELECT>;
+            bindings = <&kp LGUI>;
+        };
         sofle_gestures: sofle_gestures {
             compatible = "zmk,input-processor-behaviors";
             #input-processor-cells = <0>;
@@ -62,7 +68,7 @@
 };
 
 &tps43_listener {
-    input-processors = <&sofle_gestures>,
+    input-processors = <&sofle_pinch_modifier>, <&sofle_gestures>,
         <&zip_xy_transform (INPUT_TRANSFORM_XY_SWAP | INPUT_TRANSFORM_X_INVERT)>,
         <&zip_scroll_transform INPUT_TRANSFORM_XY_SWAP>;
 };

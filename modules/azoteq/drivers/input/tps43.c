@@ -284,6 +284,8 @@ static void tps43_cancel_gesture(const struct device *dev) {
         diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
     }
     data->drag_active = false;
+    data->pinch_contact = false;
+    data->pinch_remainder = 0;
     tps43_two_cancel(&data->two_finger);
 }
 
@@ -427,6 +429,23 @@ static void tps43_report_scroll(const struct device *dev, int32_t rel_x, int32_t
     }
 }
 
+/* HWHEEL becomes vertical WHEEL in this board's existing listener.
+ * Wrap each report independently: no modifier remains held between frames,
+ * on sensor errors, or when the peripheral disconnects. Preserve small deltas.
+ */
+static void tps43_report_pinch(const struct device *dev, int16_t raw_delta) {
+    struct tps43_drv_data *data = dev->data;
+    const struct tps43_config *config = dev->config;
+    int32_t scaled = (int32_t)raw_delta * config->zoom_sensitivity + data->pinch_remainder;
+    int32_t delta = scaled / 100;
+    data->pinch_remainder = scaled % 100;
+    if (!delta) { return; }
+    delta = CLAMP(delta, -127, 127);
+    diag_report_key(dev, INPUT_BTN_SELECT, 1, true, K_FOREVER);
+    diag_report_rel(dev, INPUT_REL_HWHEEL, delta, true, K_FOREVER);
+    diag_report_key(dev, INPUT_BTN_SELECT, 0, true, K_FOREVER);
+}
+
 /**
  * @brief Main work handler for processing trackpad events
  *
@@ -515,6 +534,15 @@ static void tps43_work_handler(struct k_work *work) {
         diag_report_key(dev, INPUT_BTN_TOUCH, is_touching ? 1 : 0, true, K_FOREVER);
     }
 
+    /* A recognized pinch owns this contact until all fingers lift. */
+    if (num_fingers == 0) {
+        drv_data->pinch_contact = false;
+        drv_data->pinch_remainder = 0;
+    }
+    if (config->zoom && num_fingers == 2 && (gestures_events[1] & TPS43_ZOOM)) {
+        drv_data->pinch_contact = true;
+    }
+
     struct tps43_two_result two = {0};
     if (config->two_finger_navigation) {
         two = tps43_two_update(&drv_data->two_finger, num_fingers, rel_x, rel_y,
@@ -560,6 +588,17 @@ static void tps43_work_handler(struct k_work *work) {
             }
             goto done;
         }
+    }
+
+    if (drv_data->pinch_contact) {
+        if (is_drag_active) {
+            diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+            is_drag_active = false;
+        }
+        if (num_fingers == 2 && (gestures_events[1] & TPS43_ZOOM)) {
+            tps43_report_pinch(dev, rel_x);
+        }
+        goto done;
     }
 
     if (two.consume) {
@@ -688,6 +727,8 @@ static int tps43_reset_values(const struct device *dev) {
     drv_data->drag_active = false;
     drv_data->gesture = (struct tps43_gesture){0};
     drv_data->two_finger = (struct tps43_two_finger){0};
+    drv_data->pinch_contact = false;
+    drv_data->pinch_remainder = 0;
 
     LOG_DBG("Values reset");
     return 0;
@@ -1572,7 +1613,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 v13: quick two-finger navigation / delayed scrolling");
+    LOG_INF("TPS43 v14: two-finger navigation / scrolling / LinearMouse pinch");
     return 0;
 }
 

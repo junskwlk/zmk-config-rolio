@@ -30,6 +30,25 @@ static inline void tps43_two_cancel(struct tps43_two_finger *s) {
     *s = (struct tps43_two_finger){.phase = TPS43_TWO_CANCELLED};
 }
 
+/* Complete short contacts at the first lift, preserving motion exactly once. */
+static inline struct tps43_two_result tps43_two_finish(
+    struct tps43_two_finger *s, int64_t now_ms, uint32_t delay_ms,
+    uint32_t nav_distance, bool swap_xy, bool invert_horizontal) {
+    struct tps43_two_result out = {.consume = true};
+    int64_t x = swap_xy ? s->dy : s->dx;
+    int64_t y = swap_xy ? s->dx : s->dy;
+    if (invert_horizontal) { x = -x; }
+    int64_t ax = tps43_two_abs(x), ay = tps43_two_abs(y);
+    if (now_ms - s->started_ms < delay_ms && ax >= nav_distance && ax >= 2 * ay) {
+        out.back = x > 0;
+        out.forward = x < 0;
+    } else {
+        out.scroll_x = tps43_two_clamp(s->dx);
+        out.scroll_y = tps43_two_clamp(s->dy);
+    }
+    return out;
+}
+
 /* A quick, horizontal stroke navigates once. Waiting locks scrolling until lift.
  * Initial movement is buffered briefly for pinch recognition. Vertical intent then
  * locks scrolling. Coordinates returned for scrolling
@@ -42,6 +61,10 @@ static inline struct tps43_two_result tps43_two_update(
     struct tps43_two_result out = {0};
     if (fingers == 0) {
         out.consume = s->phase != TPS43_TWO_IDLE && !s->tap_possible;
+        if (s->phase == TPS43_TWO_PENDING && s->motion_started &&
+            !s->tap_possible && !zooming) {
+            out = tps43_two_finish(s, now_ms, delay_ms, nav_distance, swap_xy, invert_horizontal);
+        }
         *s = (struct tps43_two_finger){0};
         return out;
     }
@@ -59,6 +82,10 @@ static inline struct tps43_two_result tps43_two_update(
     if (s->phase == TPS43_TWO_CANCELLED || s->phase == TPS43_TWO_NAV_DONE ||
         s->phase == TPS43_TWO_ENDING) { return out; }
     if (fingers != 2) {
+        if (s->phase == TPS43_TWO_PENDING && s->motion_started &&
+            !s->tap_possible && !zooming) {
+            out = tps43_two_finish(s, now_ms, delay_ms, nav_distance, swap_xy, invert_horizontal);
+        }
         s->phase = TPS43_TWO_ENDING;
         return out;
     }

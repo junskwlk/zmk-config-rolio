@@ -47,10 +47,17 @@ int main(void) {
     silent(step(&s,2,100,80,4200)); silent(step(&s,2,0,0,4280));
     r=step(&s,2,0,0,4450); assert(r.scroll_x==80 && r.scroll_y==-100);
     lift(&s,4460);
-    /* Short taps pass, short moving contacts are deliberately suppressed. */
+    /* Short taps pass; quick strokes flush once on lift, including final pinch veto. */
     step(&s,2,0,0,5000); step(&s,1,0,0,5040);
     assert(!step(&s,0,0,0,5050).consume);
-    silent(step(&s,2,0,30,5100)); assert(step(&s,0,0,0,5150).consume);
+    silent(step(&s,2,0,30,5100)); r=step(&s,0,0,0,5150);
+    assert(r.consume && r.scroll_x==30); silent(step(&s,0,0,0,5160));
+    silent(step(&s,2,100,0,5170)); r=step(&s,0,0,0,5180); assert(r.back);
+    silent(step(&s,2,-100,0,5190)); r=step(&s,0,0,0,5195); assert(r.forward);
+    silent(step(&s,2,0,30,5196));
+    r=tps43_two_update(&s,0,0,0,false,true,5197,250,80,true,true); silent(r);
+    silent(step(&s,2,0,30,5198)); r=step(&s,1,0,0,5199);
+    assert(r.scroll_x==30); silent(step(&s,1,0,0,5200)); silent(step(&s,0,0,0,5201));
     /* Finger count changes cannot restart navigation before complete lift. */
     step(&s,2,30,0,5200); step(&s,1,0,0,5210);
     silent(step(&s,2,200,0,5300)); lift(&s,5310);

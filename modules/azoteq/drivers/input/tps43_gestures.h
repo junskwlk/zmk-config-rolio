@@ -13,7 +13,7 @@ enum tps43_gesture_phase { TPS43_G_IDLE, TPS43_G_PENDING, TPS43_G_DRAG,
 struct tps43_gesture {
     enum tps43_gesture_phase phase;
     int64_t started_ms, last_tap_ms;
-    int64_t dx, dy; /* Total travel, including reversals and staggered finger lift. */
+    int32_t dx, dy;
     bool tap_armed;
 };
 struct tps43_gesture_result {
@@ -36,10 +36,6 @@ static inline struct tps43_gesture_result
 tps43_gesture_update(struct tps43_gesture *s, uint8_t fingers, int32_t dx, int32_t dy,
                      int64_t now_ms, uint32_t hold_ms, uint32_t drag_distance) {
     struct tps43_gesture_result out = {0};
-    if (s->phase == TPS43_G_PENDING || s->phase == TPS43_G_ENDING) {
-        s->dx += dx < 0 ? -(int64_t)dx : dx;
-        s->dy += dy < 0 ? -(int64_t)dy : dy;
-    }
     if (s->tap_armed && now_ms - s->last_tap_ms > TPS43_THREE_FINGER_DOUBLE_TAP_MS) {
         s->tap_armed = false;
     }
@@ -47,8 +43,7 @@ tps43_gesture_update(struct tps43_gesture *s, uint8_t fingers, int32_t dx, int32
         out.consume = s->phase != TPS43_G_IDLE;
         out.release = s->phase == TPS43_G_DRAG;
         bool tap = (s->phase == TPS43_G_PENDING || s->phase == TPS43_G_ENDING) &&
-                   now_ms - s->started_ms <= TPS43_THREE_FINGER_TAP_MS &&
-                   s->dx < drag_distance && s->dy < drag_distance;
+                   now_ms - s->started_ms <= TPS43_THREE_FINGER_TAP_MS;
         if (tap) {
             if (s->tap_armed) {
                 out.double_tap = true;
@@ -68,14 +63,12 @@ tps43_gesture_update(struct tps43_gesture *s, uint8_t fingers, int32_t dx, int32
         if (fingers < 3) { return out; }
         s->phase = fingers == 3 ? TPS43_G_PENDING : TPS43_G_CANCELLED;
         s->started_ms = now_ms;
-        s->dx = dx < 0 ? -(int64_t)dx : dx;
-        s->dy = dy < 0 ? -(int64_t)dy : dy;
+        s->dx = s->dy = 0;
     }
     out.consume = true;
     if (fingers != 3) {
         out.release = s->phase == TPS43_G_DRAG;
-        if (fingers < 3 && (s->phase == TPS43_G_PENDING || s->phase == TPS43_G_ENDING) &&
-            s->dx < drag_distance && s->dy < drag_distance) {
+        if (fingers < 3 && (s->phase == TPS43_G_PENDING || s->phase == TPS43_G_ENDING)) {
             s->phase = TPS43_G_ENDING;
         } else {
             s->phase = TPS43_G_CANCELLED;
@@ -85,7 +78,11 @@ tps43_gesture_update(struct tps43_gesture *s, uint8_t fingers, int32_t dx, int32
     }
     if (s->phase == TPS43_G_DRAG) { out.move = true; return out; }
     if (s->phase != TPS43_G_PENDING) { return out; }
-    if (s->dx >= drag_distance || s->dy >= drag_distance ||
+    s->dx += dx;
+    s->dy += dy;
+    int32_t ax = s->dx < 0 ? -s->dx : s->dx;
+    int32_t ay = s->dy < 0 ? -s->dy : s->dy;
+    if (ax >= (int32_t)drag_distance || ay >= (int32_t)drag_distance ||
         now_ms - s->started_ms >= hold_ms) {
         s->phase = TPS43_G_DRAG;
         s->tap_armed = false;

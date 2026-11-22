@@ -91,7 +91,7 @@
 
     scroll;
     invert-scroll-y;
-    /* Hardware directional swipes are disabled; three-finger motion is drag. */
+    swipes;
     three-finger-drag;
     three-finger-hold-ms = <250>;
     three-finger-drag-distance = <12>;

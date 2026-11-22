@@ -61,5 +61,20 @@ int main(void) {
     step(&s,3,30,0,8100); assert(step(&s,4,0,0,8110).release);
     step(&s,0,0,0,8120);
     assert(!step(&s,1,10,10,8130).consume);
+    /* Reversing motion is travel, not a stationary tap (net displacement is zero). */
+    s = (struct tps43_gesture){0};
+    step(&s,3,0,0,9000); step(&s,0,0,0,9050);
+    step(&s,3,7,0,9100);
+    r=step(&s,3,-7,0,9110); assert(r.press && r.move);
+    r=step(&s,0,0,0,9120); assert(r.release && !r.double_tap);
+    /* Motion during staggered lift and in the final lift frame also vetoes taps. */
+    s = (struct tps43_gesture){0};
+    step(&s,3,0,0,10000); step(&s,0,0,0,10050);
+    step(&s,3,0,0,10100); step(&s,2,0,-15,10110);
+    assert(!step(&s,0,0,0,10120).double_tap);
+    s = (struct tps43_gesture){0};
+    step(&s,3,0,0,11000); step(&s,0,0,0,11050);
+    step(&s,3,0,0,11100);
+    assert(!step(&s,0,0,-15,11120).double_tap);
     puts("all-direction drag and three-finger double-tap tests passed");
 }

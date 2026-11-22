@@ -542,7 +542,8 @@ static void tps43_work_handler(struct k_work *work) {
             diag_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
             diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
         }
-        if (gestures_events[0] & (TPS43_SWIPE_UP | TPS43_SWIPE_DOWN | TPS43_SWIPE_LEFT | TPS43_SWIPE_RIGHT)) {
+        if (config->swipes && !config->three_finger_drag &&
+            (gestures_events[0] & (TPS43_SWIPE_UP | TPS43_SWIPE_DOWN | TPS43_SWIPE_LEFT | TPS43_SWIPE_RIGHT))) {
             LOG_DBG("Single finger swipe");
             tps43_handle_swipe(dev, rel_x, rel_y);
         }
@@ -577,7 +578,7 @@ static void tps43_work_handler(struct k_work *work) {
 
     if (rel_x != 0 || rel_y != 0) {
         // Handle three-finger swipes
-        if (config->swipes) {
+        if (config->swipes && !config->three_finger_drag) {
             if (num_fingers == 3) {
                 LOG_DBG("Three-finger movement - checking for swipe");
                 tps43_handle_swipe(dev, rel_x, rel_y);

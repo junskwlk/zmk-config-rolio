@@ -45,18 +45,18 @@ int main(void) {
  struct tps43_drv_data data={0}; struct tps43_config cfg={.zoom=true,.zoom_sensitivity=50};
  struct device dev={&data,&cfg};
  assert(!route(&dev,2,0,20)); assert(count==0);
- assert(route(&dev,2,TPS43_ZOOM,1)); assert(count==0 && data.pinch_remainder==50);
+ assert(route(&dev,2,TPS43_ZOOM,1)); assert(count==0 && data.pinch_remainder==-50);
  assert(route(&dev,2,TPS43_ZOOM,1)); assert(count==3);
  assert(events[0][0]==1 && events[0][1]==INPUT_BTN_SELECT && events[0][2]==1);
- assert(events[1][0]==2 && events[1][1]==INPUT_REL_HWHEEL && events[1][2]==1);
+ assert(events[1][0]==2 && events[1][1]==INPUT_REL_HWHEEL && events[1][2]==-1);
  assert(events[2][0]==1 && events[2][1]==INPUT_BTN_SELECT && events[2][2]==0);
  assert(route(&dev,2,0,200)); assert(count==3); /* scrolling cannot leak */
  assert(route(&dev,1,TPS43_ZOOM,100)); assert(count==3); /* staggered lift */
  assert(!route(&dev,0,0,0)); assert(!data.pinch_contact && !data.pinch_remainder);
  assert(!route(&dev,1,TPS43_ZOOM,100)); assert(count==3);
- assert(route(&dev,2,TPS43_ZOOM,-2)); assert(events[4][2]==-1 && events[5][2]==0);
- tps43_report_pinch(&dev,INT16_MIN); assert(events[7][2]==-127 && events[8][2]==0);
- tps43_report_pinch(&dev,INT16_MAX); assert(events[10][2]==127 && events[11][2]==0);
+ assert(route(&dev,2,TPS43_ZOOM,-2)); assert(events[4][2]==1 && events[5][2]==0);
+ tps43_report_pinch(&dev,INT16_MIN); assert(events[7][2]==127 && events[8][2]==0);
+ tps43_report_pinch(&dev,INT16_MAX); assert(events[10][2]==-127 && events[11][2]==0);
  cfg.zoom=false; data.pinch_contact=false;
  assert(!route(&dev,2,TPS43_ZOOM,100)); assert(count==12);
 }

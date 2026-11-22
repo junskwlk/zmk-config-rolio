@@ -436,7 +436,7 @@ static void tps43_report_scroll(const struct device *dev, int32_t rel_x, int32_t
 static void tps43_report_pinch(const struct device *dev, int16_t raw_delta) {
     struct tps43_drv_data *data = dev->data;
     const struct tps43_config *config = dev->config;
-    int32_t scaled = (int32_t)raw_delta * config->zoom_sensitivity + data->pinch_remainder;
+    int32_t scaled = -(int32_t)raw_delta * config->zoom_sensitivity + data->pinch_remainder;
     int32_t delta = scaled / 100;
     data->pinch_remainder = scaled % 100;
     if (!delta) { return; }
@@ -1613,7 +1613,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 v14: two-finger navigation / scrolling / LinearMouse pinch");
+    LOG_INF("TPS43 v15: reversed pinch / initial movement intent guard");
     return 0;
 }
 

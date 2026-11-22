@@ -6,7 +6,7 @@
 #include <limits.h>
 
 /* Initial tuning value: leave time for the sensor to identify a pinch. */
-#define TPS43_TWO_INTENT_DELAY_MS 80
+#define TPS43_TWO_INTENT_DELAY_MS 120
 
 enum tps43_two_phase {
     TPS43_TWO_IDLE, TPS43_TWO_PENDING, TPS43_TWO_SCROLL,

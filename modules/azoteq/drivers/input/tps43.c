@@ -1613,7 +1613,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 v15: reversed pinch / initial movement intent guard");
+    LOG_INF("TPS43 v16: reversed pinch / 120ms movement intent guard");
     return 0;
 }
 

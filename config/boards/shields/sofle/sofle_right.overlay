@@ -101,7 +101,7 @@
     three-finger-drag;
     three-finger-hold-ms = <250>;
     three-finger-drag-distance = <12>;
-    zoom;
+    /* Natural pinch classification is disabled; double tap + hold selects zoom. */
     enable-power-management;
 
     sensitivity = <100>;

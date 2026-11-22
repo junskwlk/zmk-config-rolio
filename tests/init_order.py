@@ -27,6 +27,7 @@ struct device { const char *name; void *data; const void *config; };
 struct gpio { const void *port; unsigned pin; };
 struct k_sem { bool ready; };
 struct k_work { bool ready; };
+struct k_work_delayable { bool ready; };
 struct k_work_q { bool ready; };
 struct k_work_queue_config { const char *name; };
 static struct k_work_q tps43_work_q;
@@ -43,6 +44,7 @@ struct tps43_drv_data {
     const struct device *dev;
     struct k_sem lock;
     struct k_work work;
+    struct k_work_delayable two_tap_work;
     struct gpio_callback rdy_cb;
     bool initialized, suspended;
 };
@@ -61,6 +63,10 @@ static void k_sem_init(struct k_sem *s, int initial, int limit) {
     assert(initial == 1 && limit == 1); s->ready = true;
 }
 static void tps43_work_handler(void) {}
+static void tps43_two_tap_timeout(void) {}
+static void k_work_init_delayable(struct k_work_delayable *w, void (*handler)(void)) {
+    assert(handler != NULL); w->ready = true;
+}
 static void k_work_init(struct k_work *w, void (*handler)(void)) {
     assert(handler != NULL); w->ready = true;
 }
@@ -94,7 +100,7 @@ static int gpio_add_callback(const void *port, struct gpio_callback *cb) {
 }
 static int gpio_pin_interrupt_configure_dt(const struct gpio *g, int flags) {
     (void)g; assert(flags == GPIO_INT_EDGE_TO_ACTIVE);
-    assert(callback_added && active->lock.ready && active->work.ready);
+    assert(callback_added && active->lock.ready && active->work.ready && active->two_tap_work.ready);
     assert(active->initialized);
     armed = true;
     if (inject_irq) { tps43_rdy_callback(); }

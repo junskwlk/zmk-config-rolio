@@ -5,16 +5,13 @@
 #include <stdint.h>
 #include <limits.h>
 
-/* Initial tuning value: leave time for the sensor to identify a pinch. */
-#define TPS43_TWO_INTENT_DELAY_MS 120
-
 enum tps43_two_phase {
     TPS43_TWO_IDLE, TPS43_TWO_PENDING, TPS43_TWO_SCROLL,
     TPS43_TWO_NAV_DONE, TPS43_TWO_ENDING, TPS43_TWO_CANCELLED
 };
 struct tps43_two_finger {
     enum tps43_two_phase phase;
-    int64_t started_ms, motion_started_ms, dx, dy, travel;
+    int64_t started_ms, dx, dy, travel;
     bool motion_started;
     bool tap_possible;
 };
@@ -50,8 +47,7 @@ static inline struct tps43_two_result tps43_two_finish(
 }
 
 /* A quick, horizontal stroke navigates once. Waiting locks scrolling until lift.
- * Initial movement is buffered briefly for pinch recognition. Vertical intent then
- * locks scrolling. Coordinates returned for scrolling
+ * Vertical intent locks scrolling immediately. Coordinates returned for scrolling
  * stay in sensor space; only navigation classification uses the board transform.
  */
 static inline struct tps43_two_result tps43_two_update(
@@ -98,18 +94,12 @@ static inline struct tps43_two_result tps43_two_update(
     if (scrolling) {
         if (!s->motion_started && (dx || dy)) {
             s->motion_started = true;
-            s->motion_started_ms = now_ms;
         }
         s->dx += dx; s->dy += dy;
         s->travel += tps43_two_abs(dx) + tps43_two_abs(dy);
         if (s->travel >= 12) { s->tap_possible = false; }
     }
-    /* Start this guard on movement, not touch-down: a pinch after a long hold
-     * needs the same protection. Nothing has reached the host if ZOOM follows.
-     */
-    if (!s->motion_started || now_ms - s->motion_started_ms < TPS43_TWO_INTENT_DELAY_MS) {
-        return out;
-    }
+    if (!s->motion_started) { return out; }
     int64_t x = swap_xy ? s->dy : s->dx;
     int64_t y = swap_xy ? s->dx : s->dy;
     if (invert_horizontal) { x = -x; }

@@ -284,7 +284,8 @@ static void tps43_cancel_gesture(const struct device *dev) {
         diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
     }
     data->drag_active = false;
-    data->pinch_contact = false;
+    tps43_two_zoom_cancel(&data->two_zoom);
+    k_work_cancel_delayable(&data->two_tap_work);
     data->pinch_remainder = 0;
     tps43_two_cancel(&data->two_finger);
 }
@@ -446,6 +447,36 @@ static void tps43_report_pinch(const struct device *dev, int16_t raw_delta) {
     diag_report_key(dev, INPUT_BTN_SELECT, 0, true, K_FOREVER);
 }
 
+static void tps43_report_right_click(const struct device *dev) {
+    diag_report_key(dev, INPUT_BTN_1, 1, true, K_FOREVER);
+    diag_report_key(dev, INPUT_BTN_1, 0, true, K_FOREVER);
+}
+
+/* Delayed clicks run on the existing dedicated TPS43 queue, never sysworkq. */
+static void tps43_schedule_two_tap(const struct device *dev) {
+    struct tps43_drv_data *data = dev->data;
+    if (data->two_zoom.pending_click) {
+        int64_t remaining = MAX(0, data->two_zoom.click_due_ms - k_uptime_get());
+        k_work_reschedule_for_queue(&tps43_work_q, &data->two_tap_work, K_MSEC(remaining));
+    } else {
+        k_work_cancel_delayable(&data->two_tap_work);
+    }
+}
+
+static void tps43_two_tap_timeout(struct k_work *work) {
+    struct k_work_delayable *delayed = k_work_delayable_from_work(work);
+    struct tps43_drv_data *data = CONTAINER_OF(delayed, struct tps43_drv_data, two_tap_work);
+    const struct device *dev = data->dev;
+    k_sem_take(&data->lock, K_FOREVER);
+    if (data->suspended) {
+        tps43_two_zoom_cancel(&data->two_zoom);
+    } else if (tps43_two_zoom_tick(&data->two_zoom, k_uptime_get())) {
+        tps43_report_right_click(dev);
+    }
+    tps43_schedule_two_tap(dev);
+    k_sem_give(&data->lock);
+}
+
 /**
  * @brief Main work handler for processing trackpad events
  *
@@ -534,13 +565,19 @@ static void tps43_work_handler(struct k_work *work) {
         diag_report_key(dev, INPUT_BTN_TOUCH, is_touching ? 1 : 0, true, K_FOREVER);
     }
 
-    /* A recognized pinch owns this contact until all fingers lift. */
-    if (num_fingers == 0) {
-        drv_data->pinch_contact = false;
-        drv_data->pinch_remainder = 0;
-    }
-    if (config->zoom && num_fingers == 2 && (gestures_events[1] & TPS43_ZOOM)) {
-        drv_data->pinch_contact = true;
+    struct tps43_two_zoom_result zoom = {0};
+    if (config->two_finger_navigation) {
+        bool was_zooming = drv_data->two_zoom.phase == TPS43_Z_ACTIVE;
+        zoom = tps43_two_zoom_update(&drv_data->two_zoom, num_fingers,
+                                     rel_x, rel_y, k_uptime_get());
+        if (!was_zooming && drv_data->two_zoom.phase == TPS43_Z_ACTIVE) {
+            LOG_INF("Two-finger double tap hold -> zoom");
+        }
+        tps43_schedule_two_tap(dev);
+        if (zoom.click) { tps43_report_right_click(dev); }
+        if (drv_data->two_zoom.phase != TPS43_Z_ACTIVE) {
+            drv_data->pinch_remainder = 0;
+        }
     }
 
     struct tps43_two_result two = {0};
@@ -590,12 +627,15 @@ static void tps43_work_handler(struct k_work *work) {
         }
     }
 
-    if (drv_data->pinch_contact) {
+    if (zoom.consume) {
         if (is_drag_active) {
             diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
             is_drag_active = false;
         }
-        if (num_fingers == 2 && (gestures_events[1] & TPS43_ZOOM)) {
+        if (zoom.move && (gestures_events[1] & TPS43_SCROLL)) {
+            /* Screen Y is raw sensor X: upward movement is negative.
+             * The existing emitter negates it, producing zoom-in upward.
+             */
             tps43_report_pinch(dev, rel_x);
         }
         goto done;
@@ -615,12 +655,6 @@ static void tps43_work_handler(struct k_work *work) {
         if (two.scroll_x || two.scroll_y) {
             tps43_report_scroll(dev, two.scroll_x, two.scroll_y);
         }
-        /* A hardware right-click may arrive during a staggered finger lift. */
-        if (drv_data->two_finger.tap_possible &&
-            (gestures_events[1] & TPS43_TWO_FINGER_TAP)) {
-            diag_report_key(dev, INPUT_BTN_1, 1, true, K_FOREVER);
-            diag_report_key(dev, INPUT_BTN_1, 0, true, K_FOREVER);
-        }
         goto done;
     }
 
@@ -637,7 +671,7 @@ static void tps43_work_handler(struct k_work *work) {
             LOG_DBG("Single finger swipe");
             tps43_handle_swipe(dev, rel_x, rel_y);
         }
-        if (gestures_events[1] & TPS43_TWO_FINGER_TAP) {
+        if (!config->two_finger_navigation && (gestures_events[1] & TPS43_TWO_FINGER_TAP)) {
             LOG_DBG("Two finger tap → RIGHT BUTTON");
             diag_report_key(dev, INPUT_BTN_1, 1, true, K_FOREVER);
             diag_report_key(dev, INPUT_BTN_1, 0, true, K_FOREVER);
@@ -727,7 +761,8 @@ static int tps43_reset_values(const struct device *dev) {
     drv_data->drag_active = false;
     drv_data->gesture = (struct tps43_gesture){0};
     drv_data->two_finger = (struct tps43_two_finger){0};
-    drv_data->pinch_contact = false;
+    drv_data->two_zoom = (struct tps43_two_zoom){0};
+    k_work_cancel_delayable(&drv_data->two_tap_work);
     drv_data->pinch_remainder = 0;
 
     LOG_DBG("Values reset");
@@ -1536,6 +1571,7 @@ static int tps43_init(const struct device *dev) {
     /* GPIO callbacks can run as soon as the interrupt is enabled. */
     k_sem_init(&drv_data->lock, 1, 1);
     k_work_init(&drv_data->work, tps43_work_handler);
+    k_work_init_delayable(&drv_data->two_tap_work, tps43_two_tap_timeout);
     if (!tps43_work_q_started) {
         static const struct k_work_queue_config queue_config = {.name = "TPS43 input"};
         k_work_queue_start(&tps43_work_q, tps43_work_stack,
@@ -1613,7 +1649,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 v16: reversed pinch / 120ms movement intent guard");
+    LOG_INF("TPS43 v17: two-finger double tap hold / vertical zoom");
     return 0;
 }
 

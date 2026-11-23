@@ -47,17 +47,17 @@ static bool route(struct device *dev,bool consume,bool move,int16_t dx,int16_t d
 """
 main = r"""
 int main(void) {
- struct tps43_drv_data data={0}; struct tps43_config cfg={.zoom_sensitivity=20};
+ struct tps43_drv_data data={0}; struct tps43_config cfg={.zoom_sensitivity=10};
  struct device dev={&data,&cfg};
  tps43_set_zoom_modifier(&dev,true); assert(count==1 && data.zoom_modifier_held);
  assert(events[0][0]==1 && events[0][1]==INPUT_BTN_SELECT && events[0][2]==1);
  /* Command stays down across all frames, including tiny/zero movement. */
- for(int i=0;i<4;i++) assert(route(&dev,true,true,-1,0,0));
- assert(count==1 && data.pinch_remainder==80);
+ for(int i=0;i<9;i++) assert(route(&dev,true,true,-1,0,0));
+ assert(count==1 && data.pinch_remainder==90);
  assert(route(&dev,true,true,-1,0,0));assert(count==2 && data.zoom_motion_logged);
  assert(events[1][0]==2 && events[1][1]==INPUT_REL_HWHEEL && events[1][2]==1);
- assert(route(&dev,true,true,5,0,0));assert(count==3 && events[2][2]==-1);
- assert(route(&dev,true,true,-50,0,0));assert(count==4 && events[3][2]==10);
+ assert(route(&dev,true,true,10,0,0));assert(count==3 && events[2][2]==-1);
+ assert(route(&dev,true,true,-50,0,0));assert(count==4 && events[3][2]==5);
  assert(!route(&dev,false,true,-10,0,0));assert(count==4);
  assert(route(&dev,true,false,-10,0,0));assert(count==4);
  assert(route(&dev,true,true,0,20,0));assert(count==4);
@@ -74,4 +74,4 @@ with tempfile.TemporaryDirectory(prefix="sofle-pinch-test-") as tmp:
  p.write_text(stub+modifier+helper+routehead+routing+"\n return false;\n done: return true;\n}\n"+main)
  subprocess.run(["clang","-std=c11","-Wall","-Wextra","-Werror","-fsanitize=address,undefined",str(p),"-o",str(binary)],check=True)
  subprocess.run([str(binary)],check=True)
-print("actual held-modifier zoom / sensitivity 20 / direction / fraction tests passed")
+print("actual held-modifier zoom / sensitivity 10 / direction / fraction tests passed")

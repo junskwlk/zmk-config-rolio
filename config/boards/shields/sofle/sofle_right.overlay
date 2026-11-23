@@ -106,7 +106,7 @@
 
     sensitivity = <100>;
     scroll-sensitivity = <30>;
-    zoom-sensitivity = <20>;
+    zoom-sensitivity = <10>;
     filter-settings = <0x0B>;
 
     switch-xy;

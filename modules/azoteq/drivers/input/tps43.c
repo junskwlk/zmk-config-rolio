@@ -1675,7 +1675,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 v19: held Command zoom / sensitivity 20");
+    LOG_INF("TPS43 v20: held Command zoom / sensitivity 10");
     return 0;
 }
 

@@ -287,6 +287,7 @@ static void tps43_cancel_gesture(const struct device *dev) {
     tps43_two_zoom_cancel(&data->two_zoom);
     k_work_cancel_delayable(&data->two_tap_work);
     data->pinch_remainder = 0;
+    data->zoom_motion_logged = false;
     tps43_two_cancel(&data->two_finger);
 }
 
@@ -575,8 +576,12 @@ static void tps43_work_handler(struct k_work *work) {
         }
         tps43_schedule_two_tap(dev);
         if (zoom.click) { tps43_report_right_click(dev); }
+        if (was_zooming && drv_data->two_zoom.phase != TPS43_Z_ACTIVE) {
+            LOG_INF("Zoom end: fingers=%u", num_fingers);
+        }
         if (drv_data->two_zoom.phase != TPS43_Z_ACTIVE) {
             drv_data->pinch_remainder = 0;
+            drv_data->zoom_motion_logged = false;
         }
     }
 
@@ -632,7 +637,12 @@ static void tps43_work_handler(struct k_work *work) {
             diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
             is_drag_active = false;
         }
-        if (zoom.move && (gestures_events[1] & TPS43_SCROLL)) {
+        if (zoom.move) {
+            if (!drv_data->zoom_motion_logged && (rel_x || rel_y)) {
+                LOG_INF("Zoom first movement: dx=%d dy=%d gestures=0x%02x",
+                        rel_x, rel_y, gestures_events[1]);
+                drv_data->zoom_motion_logged = true;
+            }
             /* Screen Y is raw sensor X: upward movement is negative.
              * The existing emitter negates it, producing zoom-in upward.
              */
@@ -764,6 +774,7 @@ static int tps43_reset_values(const struct device *dev) {
     drv_data->two_zoom = (struct tps43_two_zoom){0};
     k_work_cancel_delayable(&drv_data->two_tap_work);
     drv_data->pinch_remainder = 0;
+    drv_data->zoom_motion_logged = false;
 
     LOG_DBG("Values reset");
     return 0;
@@ -1649,7 +1660,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 v17: two-finger double tap hold / vertical zoom");
+    LOG_INF("TPS43 v18: double tap hold / ungated zoom movement");
     return 0;
 }
 

@@ -50,6 +50,17 @@ static int diag_report(const struct device *dev, uint8_t type, uint16_t code,
 #define diag_report_rel(dev, code, value, sync, timeout) \
     diag_report(dev, INPUT_EV_REL, code, value, sync, timeout)
 
+/* Keyboard and mouse HID reports use separate host queues. Keep Command
+ * down across the entire explicit zoom gesture instead of toggling per frame.
+ */
+static void tps43_set_zoom_modifier(const struct device *dev, bool pressed) {
+    struct tps43_drv_data *data = dev->data;
+    if (data->zoom_modifier_held == pressed) { return; }
+    if (!diag_report_key(dev, INPUT_BTN_SELECT, pressed ? 1 : 0, true, K_FOREVER)) {
+        data->zoom_modifier_held = pressed;
+    }
+}
+
 static void diag_input_received(struct input_event *event) {
     if (atomic_get(&diag_online) && event->dev == diag_dev) {
         atomic_inc(&diag_delivered);
@@ -284,6 +295,7 @@ static void tps43_cancel_gesture(const struct device *dev) {
         diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
     }
     data->drag_active = false;
+    tps43_set_zoom_modifier(dev, false);
     tps43_two_zoom_cancel(&data->two_zoom);
     k_work_cancel_delayable(&data->two_tap_work);
     data->pinch_remainder = 0;
@@ -432,8 +444,7 @@ static void tps43_report_scroll(const struct device *dev, int32_t rel_x, int32_t
 }
 
 /* HWHEEL becomes vertical WHEEL in this board's existing listener.
- * Wrap each report independently: no modifier remains held between frames,
- * on sensor errors, or when the peripheral disconnects. Preserve small deltas.
+ * Preserve small deltas. Command is held for the gesture, not each report.
  */
 static void tps43_report_pinch(const struct device *dev, int16_t raw_delta) {
     struct tps43_drv_data *data = dev->data;
@@ -443,9 +454,10 @@ static void tps43_report_pinch(const struct device *dev, int16_t raw_delta) {
     data->pinch_remainder = scaled % 100;
     if (!delta) { return; }
     delta = CLAMP(delta, -127, 127);
-    diag_report_key(dev, INPUT_BTN_SELECT, 1, true, K_FOREVER);
-    diag_report_rel(dev, INPUT_REL_HWHEEL, delta, true, K_FOREVER);
-    diag_report_key(dev, INPUT_BTN_SELECT, 0, true, K_FOREVER);
+    tps43_set_zoom_modifier(dev, true);
+    if (data->zoom_modifier_held) {
+        diag_report_rel(dev, INPUT_REL_HWHEEL, delta, true, K_FOREVER);
+    }
 }
 
 static void tps43_report_right_click(const struct device *dev) {
@@ -471,6 +483,7 @@ static void tps43_two_tap_timeout(struct k_work *work) {
     k_sem_take(&data->lock, K_FOREVER);
     if (data->suspended) {
         tps43_two_zoom_cancel(&data->two_zoom);
+        tps43_set_zoom_modifier(dev, false);
     } else if (tps43_two_zoom_tick(&data->two_zoom, k_uptime_get())) {
         tps43_report_right_click(dev);
     }
@@ -574,6 +587,7 @@ static void tps43_work_handler(struct k_work *work) {
         if (!was_zooming && drv_data->two_zoom.phase == TPS43_Z_ACTIVE) {
             LOG_INF("Two-finger double tap hold -> zoom");
         }
+        tps43_set_zoom_modifier(dev, drv_data->two_zoom.phase == TPS43_Z_ACTIVE);
         tps43_schedule_two_tap(dev);
         if (zoom.click) { tps43_report_right_click(dev); }
         if (was_zooming && drv_data->two_zoom.phase != TPS43_Z_ACTIVE) {
@@ -769,6 +783,7 @@ static int tps43_reset_values(const struct device *dev) {
     drv_data->device_ready = false;
     drv_data->initialized = false;
     drv_data->drag_active = false;
+    tps43_set_zoom_modifier(dev, false);
     drv_data->gesture = (struct tps43_gesture){0};
     drv_data->two_finger = (struct tps43_two_finger){0};
     drv_data->two_zoom = (struct tps43_two_zoom){0};
@@ -1660,7 +1675,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 v18: double tap hold / ungated zoom movement");
+    LOG_INF("TPS43 v19: held Command zoom / sensitivity 20");
     return 0;
 }
 

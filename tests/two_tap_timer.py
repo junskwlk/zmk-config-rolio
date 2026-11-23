@@ -23,8 +23,11 @@ struct device { void *data; };
 struct tps43_drv_data {
  const struct device *dev; int lock;
  struct k_work_delayable two_tap_work;
- struct tps43_two_zoom two_zoom; bool suspended;
+ struct tps43_two_zoom two_zoom; bool suspended, zoom_modifier_held;
 };
+static void tps43_set_zoom_modifier(const struct device *dev,bool pressed) {
+ struct tps43_drv_data *data=dev->data;data->zoom_modifier_held=pressed;
+}
 static int tps43_work_q, clicks, reports;
 static int64_t now,delay=-1;
 static struct k_work_delayable *k_work_delayable_from_work(struct k_work *w) {
@@ -60,9 +63,9 @@ int main(void) {
  tps43_two_zoom_update(&data.two_zoom,0,0,0,1500);
  tps43_two_zoom_update(&data.two_zoom,2,0,0,2000);
  tps43_two_zoom_update(&data.two_zoom,0,0,0,2050);
- now=2400;data.suspended=true;
+ now=2400;data.suspended=true;data.zoom_modifier_held=true;
  tps43_two_tap_timeout(&data.two_tap_work.work);
- assert(clicks==1 && delay==-1 && !data.two_zoom.pending_click);
+ assert(clicks==1 && delay==-1 && !data.two_zoom.pending_click && !data.zoom_modifier_held);
 }
 """
 with tempfile.TemporaryDirectory(prefix='sofle-tap-timer-') as tmp:

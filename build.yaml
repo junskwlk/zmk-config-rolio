@@ -3,8 +3,8 @@ include:
   - board: nice_nano_v2
     shield: sofle_left vista508
     snippet: studio-rpc-usb-uart
-    artifact-name: sofle_left_doubletap_zoom_v18
+    artifact-name: sofle_left_doubletap_zoom_v19
   - board: nice_nano_v2
     shield: sofle_right
     snippet: zmk-usb-logging
-    artifact-name: sofle_right_doubletap_zoom_v18
+    artifact-name: sofle_right_doubletap_zoom_v19

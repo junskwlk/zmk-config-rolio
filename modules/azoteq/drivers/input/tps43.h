@@ -284,6 +284,7 @@ struct tps43_drv_data {
     struct tps43_two_zoom two_zoom;
     int32_t pinch_remainder;
     bool zoom_motion_logged;
+    bool zoom_modifier_held;
     bool suspended;
     bool touching;
 };

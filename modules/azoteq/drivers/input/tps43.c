@@ -1724,7 +1724,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 v21: software one-finger tap / double-tap hold drag");
+    LOG_INF("TPS43 v22: movement-gated one-finger double-tap drag");
     return 0;
 }
 

@@ -14,13 +14,29 @@ int main(void) {
     /* Second touch holds left click before movement is emitted, then releases. */
     r=step(&s,1,2,0,300);assert(!r.press && !r.move_x);
     r=step(&s,1,3,4,329);assert(!r.press && !r.move_x);
-    r=step(&s,1,5,6,330);assert(r.press && r.move_x==10 && r.move_y==10);
+    r=step(&s,1,5,6,330);assert(!r.press && !r.move_x);
+    r=step(&s,1,2,0,331);assert(r.press && r.move_x==12 && r.move_y==10);
     r=step(&s,1,-8,2,350);assert(!r.press && r.move_x==-8 && r.move_y==2);
     r=step(&s,0,0,0,400);assert(r.release && !r.click && !s.armed);
     assert(!step(&s,0,0,0,410).release);
     /* A normal short second tap is a second click, preserving double-click. */
     step(&s,1,0,0,1000);assert(step(&s,0,0,0,1050).click);
     step(&s,1,0,0,1100);r=step(&s,0,0,0,1110);assert(r.click && !r.press && !s.armed);
+    /* Replacing a finger on an open menu never presses solely due to time. */
+    step(&s,1,0,0,1200);assert(step(&s,0,0,0,1250).click);
+    step(&s,1,0,0,1300);
+    r=step(&s,1,0,0,1330);assert(!r.press);
+    r=step(&s,1,0,0,1400);assert(!r.press);
+    r=step(&s,0,0,0,1450);assert(r.click && !r.release);
+    /* A stationary long second contact produces no drag or click. */
+    step(&s,1,0,0,1500);step(&s,0,0,0,1550);
+    step(&s,1,0,0,1600);
+    r=step(&s,1,0,0,1900);assert(!r.press);
+    r=step(&s,0,0,0,1901);assert(!r.click && !r.press && !r.release);
+    /* Subthreshold jitter stays below the drag gate, even beyond the guard. */
+    step(&s,1,0,0,1920);step(&s,0,0,0,1930);
+    step(&s,1,11,0,1940);r=step(&s,1,-11,0,1970);assert(!r.press);
+    r=step(&s,0,0,0,1980);assert(r.click && !r.release);
     /* Small jitter is not summed repeatedly into a false drag rejection. */
     step(&s,1,0,0,2000);
     for(int i=0;i<10;i++) step(&s,1,i%2?-10:10,0,2010+i*10);
@@ -45,10 +61,10 @@ int main(void) {
     }
     /* A multi-finger chord or an error cancels an already-held left click once. */
     step(&s,1,0,0,6000);step(&s,0,0,0,6050);
-    step(&s,1,0,0,6100);assert(step(&s,1,0,0,6130).press);
+    step(&s,1,0,0,6100);assert(step(&s,1,12,0,6130).press);
     r=step(&s,2,0,0,6200);assert(r.release && !r.consume);step(&s,0,0,0,6250);
     step(&s,1,0,0,6300);step(&s,0,0,0,6350);
-    step(&s,1,0,0,6400);step(&s,1,0,0,6430);
+    step(&s,1,0,0,6400);step(&s,1,0,12,6430);
     assert(tps43_one_cancel(&s));assert(!tps43_one_cancel(&s));step(&s,0,0,0,6500);
     /* Gap equality is a new first contact, not double tap. */
     step(&s,1,0,0,7000);step(&s,0,0,0,7050);
@@ -58,5 +74,5 @@ int main(void) {
     step(&s,1,50,0,7500);r=step(&s,0,0,0,7510);
     assert(r.press && r.move_x==50 && r.release && !r.click);
     step(&s,1,INT32_MIN,INT32_MAX,8000);assert(!step(&s,0,0,0,8010).click);
-    puts("software tap / immediate click / second-tap drag / chord isolation tests passed");
+    puts("immediate click / movement-gated drag / stationary retouch / chord isolation tests passed");
 }

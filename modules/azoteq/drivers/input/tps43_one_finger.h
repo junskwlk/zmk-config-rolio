@@ -8,6 +8,7 @@
 #define TPS43_ONE_TAP_DISTANCE 24
 #define TPS43_ONE_DOUBLE_TAP_MS 350
 #define TPS43_ONE_CHORD_MS 30
+#define TPS43_ONE_DRAG_DISTANCE 12
 
 enum tps43_one_phase { TPS43_O_IDLE, TPS43_O_TRACK, TPS43_O_SECOND,
                        TPS43_O_DRAG, TPS43_O_CANCELLED };
@@ -30,9 +31,9 @@ static inline bool tps43_one_cancel(struct tps43_one_finger *s) {
     *s=(struct tps43_one_finger){.phase=TPS43_O_CANCELLED};
     return release;
 }
-/* First tap clicks on release, immediately. The next contact holds left click
- * for dragging. Only the second contact has a short chord-assembly guard, so
- * adding a second/third finger does not immediately start a one-finger drag.
+/* First tap clicks immediately. A second contact must move far enough before
+ * pressing left; elapsed time alone never starts a drag. Keep the chord guard
+ * so adding another finger can cancel before a one-finger button press.
  */
 static inline struct tps43_one_result tps43_one_update(
     struct tps43_one_finger *s,uint8_t fingers,int32_t dx,int32_t dy,int64_t now) {
@@ -52,12 +53,11 @@ static inline struct tps43_one_result tps43_one_update(
                 s->armed=tap;
                 s->last_tap_ms=now;
             } else {
-                if (tap) { out.click=true; }
-                else if (s->dx || s->dy) {
+                if (s->excursion>=TPS43_ONE_DRAG_DISTANCE) {
                     out.press=out.release=true;
                     out.move_x=tps43_one_clamp(s->dx);
                     out.move_y=tps43_one_clamp(s->dy);
-                }
+                } else if (tap) { out.click=true; }
                 s->armed=false;
             }
         } else {
@@ -84,7 +84,8 @@ static inline struct tps43_one_result tps43_one_update(
     if (y>s->excursion) { s->excursion=y; }
     if (s->phase==TPS43_O_TRACK) {
         out.move_x=dx;out.move_y=dy;
-    } else if (now-s->started_ms>=TPS43_ONE_CHORD_MS) {
+    } else if (now-s->started_ms>=TPS43_ONE_CHORD_MS &&
+               s->excursion>=TPS43_ONE_DRAG_DISTANCE) {
         s->phase=TPS43_O_DRAG;
         out.press=true;
         out.move_x=tps43_one_clamp(s->dx);

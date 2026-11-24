@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include "tps43_gestures.h"
 #include "tps43_two_finger.h"
+#include "tps43_one_finger.h"
 #include "tps43_two_zoom.h"
 
 #ifdef __cplusplus
@@ -206,6 +207,7 @@ struct tps43_config {
     struct gpio_dt_spec rst_gpio;
 
     bool single_tap;
+    bool single_finger_tap_drag;
     bool press_and_hold;
     bool two_finger_tap;
     bool scroll;
@@ -280,6 +282,7 @@ struct tps43_drv_data {
     bool initialized;
     bool drag_active;
     struct tps43_gesture gesture;
+    struct tps43_one_finger one_finger;
     struct tps43_two_finger two_finger;
     struct tps43_two_zoom two_zoom;
     int32_t pinch_remainder;

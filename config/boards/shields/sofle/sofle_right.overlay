@@ -85,8 +85,8 @@
      * See: dts/bindings/input/azoteq,tps43-common.yaml for a full list.
      */
     single-tap;
-    press-and-hold;
-    hold-time = <250>;
+    /* Keep hardware tap reporting for comparison; software owns click output. */
+    single-finger-tap-drag;
     two-finger-tap;
 
     scroll;

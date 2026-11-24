@@ -447,3 +447,7 @@ properties:
   two-finger-navigation-invert-x:
     type: boolean
     description: Invert horizontal navigation direction after the navigation axis swap.
+
+  single-finger-tap-drag:
+    type: boolean
+    description: Software single tap click and second-tap hold drag using touch reports.

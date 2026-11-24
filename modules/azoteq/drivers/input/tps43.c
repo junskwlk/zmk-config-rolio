@@ -291,7 +291,9 @@ static void tps43_force_communication(const struct device *dev) {
 /* Must be called while holding the I2C/state lock. */
 static void tps43_cancel_gesture(const struct device *dev) {
     struct tps43_drv_data *data = dev->data;
-    if (tps43_gesture_cancel(&data->gesture) || data->drag_active) {
+    bool release_one = tps43_one_cancel(&data->one_finger);
+    bool release_three = tps43_gesture_cancel(&data->gesture);
+    if (release_one || release_three || data->drag_active) {
         diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
     }
     data->drag_active = false;
@@ -460,6 +462,23 @@ static void tps43_report_pinch(const struct device *dev, int16_t raw_delta) {
     }
 }
 
+static void tps43_report_one_finger(const struct device *dev,
+                                     struct tps43_one_result one) {
+    const struct tps43_config *config = dev->config;
+    if (one.press) { diag_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER); }
+    if (one.move_x || one.move_y) {
+        int64_t x = ((int64_t)one.move_x * config->sensitivity) / 100;
+        int64_t y = ((int64_t)one.move_y * config->sensitivity) / 100;
+        diag_report_rel(dev, INPUT_REL_X, CLAMP(x, INT16_MIN, INT16_MAX), false, K_FOREVER);
+        diag_report_rel(dev, INPUT_REL_Y, CLAMP(y, INT16_MIN, INT16_MAX), true, K_FOREVER);
+    }
+    if (one.click) {
+        diag_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
+        diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+    }
+    if (one.release) { diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER); }
+}
+
 static void tps43_report_right_click(const struct device *dev) {
     diag_report_key(dev, INPUT_BTN_1, 1, true, K_FOREVER);
     diag_report_key(dev, INPUT_BTN_1, 0, true, K_FOREVER);
@@ -599,6 +618,27 @@ static void tps43_work_handler(struct k_work *work) {
         }
     }
 
+    struct tps43_one_result one = {0};
+    if (config->single_finger_tap_drag) {
+        if (touch_data[3] & (TPS43_PALM_DETECT | TPS43_TOO_MANY_FINGERS)) {
+            one.release = tps43_one_cancel(&drv_data->one_finger);
+            one.consume = true;
+        } else {
+            one = tps43_one_update(&drv_data->one_finger, num_fingers, rel_x, rel_y,
+                                   k_uptime_get());
+        }
+        if (one.tap_end) {
+            LOG_INF("One-finger tap: click=%d ms=%lld excursion=%lld hw=%u",
+                    one.click, (long long)one.tap_ms, (long long)one.excursion,
+                    !!(gestures_events[0] & TPS43_SINGLE_TAP));
+        }
+        /* Release an existing one-finger drag before another chord takes over. */
+        if (one.release && !one.press) {
+            diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+            one.release = false;
+        }
+    }
+
     struct tps43_two_result two = {0};
     if (config->two_finger_navigation) {
         two = tps43_two_update(&drv_data->two_finger, num_fingers, rel_x, rel_y,
@@ -682,11 +722,16 @@ static void tps43_work_handler(struct k_work *work) {
         goto done;
     }
 
+    if (one.consume) {
+        tps43_report_one_finger(dev, one);
+        goto done;
+    }
+
     if (gestures_events[0] != 0 || gestures_events[1] != 0) {
 
         LOG_DBG("Gestures: Single=0x%02X, Multi=0x%02X", gestures_events[0], gestures_events[1]);
 
-        if (gestures_events[0] & TPS43_SINGLE_TAP) {
+        if (!config->single_finger_tap_drag && (gestures_events[0] & TPS43_SINGLE_TAP)) {
             LOG_DBG("Single tap → LEFT BUTTON");
             diag_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
             diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
@@ -784,6 +829,10 @@ static int tps43_reset_values(const struct device *dev) {
     drv_data->initialized = false;
     drv_data->drag_active = false;
     tps43_set_zoom_modifier(dev, false);
+    if (tps43_one_cancel(&drv_data->one_finger)) {
+        diag_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+    }
+    drv_data->one_finger = (struct tps43_one_finger){0};
     drv_data->gesture = (struct tps43_gesture){0};
     drv_data->two_finger = (struct tps43_two_finger){0};
     drv_data->two_zoom = (struct tps43_two_zoom){0};
@@ -1675,7 +1724,7 @@ static int tps43_init(const struct device *dev) {
 
     diag_dev = dev;
     atomic_set(&diag_online, 1);
-    LOG_INF("TPS43 v20: held Command zoom / sensitivity 10");
+    LOG_INF("TPS43 v21: software one-finger tap / double-tap hold drag");
     return 0;
 }
 
@@ -1692,7 +1741,8 @@ static int tps43_init(const struct device *dev) {
         .i2c_bus = I2C_DT_SPEC_INST_GET(inst),                                                       \
         .rdy_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, rdy_gpios, {0}),                                  \
         .rst_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, rst_gpios, {0}),                                  \
-        .single_tap = DT_INST_PROP(inst, single_tap),                                                \
+        .single_tap = DT_INST_PROP(inst, single_tap),                                       \
+        .single_finger_tap_drag = DT_INST_PROP(inst, single_finger_tap_drag),                                                \
         .press_and_hold = DT_INST_PROP(inst, press_and_hold),                                        \
         .two_finger_tap = DT_INST_PROP(inst, two_finger_tap),                                       \
         .scroll = DT_INST_PROP(inst, scroll),                                                        \

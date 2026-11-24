@@ -66,9 +66,21 @@ int main(void) {
     step(&s,1,0,0,6300);step(&s,0,0,0,6350);
     step(&s,1,0,0,6400);step(&s,1,0,12,6430);
     assert(tps43_one_cancel(&s));assert(!tps43_one_cancel(&s));step(&s,0,0,0,6500);
+    /* 199ms permits drag; 200ms and later retouches only move the cursor. */
+    for (int gap=199;gap<=350;gap++) {
+        s=(struct tps43_one_finger){0};
+        step(&s,1,0,0,6600);assert(step(&s,0,0,0,6650).click);
+        r=step(&s,1,12,0,6650+gap);
+        assert(!r.press);
+        r=step(&s,1,1,0,6680+gap);
+        if (gap==199) { assert(r.press && r.move_x==13); }
+        else { assert(!r.press && r.move_x==1 && s.phase==TPS43_O_TRACK); }
+        step(&s,0,0,0,6690+gap);
+    }
+    s=(struct tps43_one_finger){0};
     /* Gap equality is a new first contact, not double tap. */
     step(&s,1,0,0,7000);step(&s,0,0,0,7050);
-    r=step(&s,1,0,0,7400);assert(s.phase==TPS43_O_TRACK && !r.press);
+    r=step(&s,1,0,0,7250);assert(s.phase==TPS43_O_TRACK && !r.press);
     assert(step(&s,0,0,0,7450).click);
     /* A rapid drag that finishes during chord guard preserves movement and release. */
     step(&s,1,50,0,7500);r=step(&s,0,0,0,7510);
